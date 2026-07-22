@@ -170,20 +170,30 @@ impl ColNetwork {
     }
 
     /// Flip colour of vertex u and reclassify all incident edges.
+    ///
+    /// Performance notes (semantics identical to the original two-loop version):
+    /// - No heap allocation: the partner set is just every w != u, so no Vec needed.
+    /// - All adjacency reads go through row u (`adj[u*n + w]`), which is contiguous
+    ///   in memory; the old code read `adj[w*n + u]` for w < u (stride-n column access).
+    /// - Removal pass and reinsertion pass are kept separate and iterate partners in
+    ///   the same order as before, so bucket contents (and hence the RNG-driven
+    ///   trajectory for a given seed) are bit-identical to the previous implementation.
     pub fn flip_colour(&mut self, u: u32, t: f64) {
         let n = self.n as usize;
         let uidx = u as usize;
+        let row = uidx * n; // base of row u in adjacency
         let old = self.colour[uidx];
         let new = 1 - old;
-        let mut partners: Vec<u32> = Vec::with_capacity(n - 1);
-        // Loop 1: w in [0, u) canonical (w, u)
-        for w in 0..u {
-            let a = w;
-            let b = u; // a < b
+        // Pass 1: remove all incident edges from their current buckets.
+        // Bucket membership still reflects the OLD colour of u, so
+        // same_colour(w) == (colour[w] == old).
+        for w in 0..self.n {
+            if w == u { continue; }
+            let (a, b) = if w < u { (w, u) } else { (u, w) };
             let k = tri_index(a, b);
             let i = self.pos[k] as usize;
-            let present = self.adj[a as usize * n + b as usize] != 0;
-            let same = self.colour[a as usize] == self.colour[b as usize];
+            let present = self.adj[row + w as usize] != 0;
+            let same = self.colour[w as usize] == old;
             let b_from = which_bucket(present, same);
             let bucket_vec = &mut self.buckets[bidx(b_from)];
             let (ru, rv) = bucket_vec.pop_at(i);
@@ -192,32 +202,15 @@ impl ColNetwork {
                 let (su, sv) = bucket_vec.a[i];
                 self.pos[tri_index(su, sv)] = i as u32;
             }
-            partners.push(w);
-        }
-        // Loop 2: w in (u, N) canonical (u, w)
-        for w in (u + 1)..self.n {
-            let a = u;
-            let b = w; // a < b
-            let k = tri_index(a, b);
-            let i = self.pos[k] as usize;
-            let present = self.adj[a as usize * n + b as usize] != 0;
-            let same = self.colour[a as usize] == self.colour[b as usize];
-            let b_from = which_bucket(present, same);
-            let bucket_vec = &mut self.buckets[bidx(b_from)];
-            let (ru, rv) = bucket_vec.pop_at(i);
-            debug_assert_eq!((ru, rv), (a, b));
-            if i < bucket_vec.len() {
-                let (su, sv) = bucket_vec.a[i];
-                self.pos[tri_index(su, sv)] = i as u32;
-            }
-            partners.push(w);
         }
         self.colour[uidx] = new;
         if old == 0 { self.ones_count += 1; } else { self.ones_count -= 1; }
-        for &w in &partners {
-            let (a, b) = if u < w { (u, w) } else { (w, u) };
-            let present = self.adj[a as usize * n + b as usize] != 0;
-            let same = self.colour[a as usize] == self.colour[b as usize];
+        // Pass 2: reinsert with the NEW colour: same_colour(w) == (colour[w] == new).
+        for w in 0..self.n {
+            if w == u { continue; }
+            let (a, b) = if w < u { (w, u) } else { (u, w) };
+            let present = self.adj[row + w as usize] != 0;
+            let same = self.colour[w as usize] == new;
             let b_new = which_bucket(present, same);
             let idx = self.buckets[bidx(b_new)].push(a, b);
             self.pos[tri_index(a, b)] = idx as u32;

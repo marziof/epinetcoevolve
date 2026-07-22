@@ -102,6 +102,10 @@ struct Cli {
     /// dump_adj (if set, dump adjacency matrix each sample; reordered: all 0s then 1s, degree-ascending within group)
     #[arg(long = "dump_adj", default_value_t = false)]
     dump_adj: bool,
+
+    /// stop_at_polarisation (stop as soon as no discordant PRESENT edges remain)
+    #[arg(long = "stop_at_polarisation", default_value_t = false)]
+    stop_at_polarisation: bool,
 }
 // (stats module handles its own file I/O; no direct file imports needed here)
 mod stats;
@@ -206,6 +210,7 @@ fn main() {
     println!("  p00            = {}", args.p00);
     println!("  p01            = {}", args.p01);
     println!("  p11            = {}", args.p11);
+    println!("  stop_at_polarisation = {}", args.stop_at_polarisation);
     println!("  output         = {}", output_path);
     println!();
 
@@ -233,19 +238,30 @@ fn main() {
     // Precompute normaliser for density: N*(N-1)
     let denom_pairs = (args.n as f64) * ((args.n as f64) - 1.0);
 
+    // Loop-invariant rate constants (hoisted out of the simulation loop;
+    // the <= 0 clamps preserve the old per-iteration guard semantics).
+    let rate_flip = args.eta * 2.0;
+    let rate_c0 = if args.sc0 > 0.0 { rho * args.sc0 } else { 0.0 };
+    let rate_c1 = if args.sc1 > 0.0 { rho * args.sc1 } else { 0.0 };
+    let rate_d0 = if args.sd0 > 0.0 { rho * args.sd0 } else { 0.0 };
+    let rate_d1 = if args.sd1 > 0.0 { rho * args.sd1 } else { 0.0 };
+
     // Simulation loop (Gillespie direct method)
     let mut t = 0.0f64;
     let mut samples_done: u64 = 0;
     let mut sim_steps: u64 = 0;
     let mut sim_steps_v: u64 = 0; // colour flips
     let mut absorbing_state = false;
+    let mut stopped_at_polarisation = false;
     let started = Instant::now();
 
-    // Statistics writer init + header (compute_stats will append rows)
+    // Statistics writer init + header (compute_stats will append rows).
+    // The loop's first iteration writes the t=0 sample, so we don't write it
+    // here (would produce a duplicate row).
     init_stats_writer(Some(output_path.clone()), &args, effective_seed, seed_random, args.dump_adj);
-    compute_stats(0.0, net.adj(), net.colour(), net.last_flip_times(), n);
 
     while t < t_max {
+        let mut sampled_this_iter = false;
         // Sampling tick? update progress + (later) stats
         let next_tick_t = (samples_done as f64) * sample_delta;
         if t >= next_tick_t {
@@ -253,24 +269,24 @@ fn main() {
             update_bar(&pb, t, net.present_edges(), net.ones_count(), denom_pairs, n);
             compute_stats(t, net.adj(), net.colour(), net.last_flip_times(), n);
             samples_done += 1;
+            sampled_this_iter = true;
         }
 
-        // Event rates
-        let r0 = if !net.bucket_is_empty(bidx(BucketKind::D1)) {
-            args.eta * 2.0 * (net.bucket_len(bidx(BucketKind::D1)) as f64)
-        } else { 0.0 };
-        let r1 = if args.sc0 > 0.0 {
-            rho * args.sc0 * (net.bucket_len(bidx(BucketKind::C0)) as f64)
-        } else { 0.0 };
-        let r2 = if args.sc1 > 0.0 {
-            rho * args.sc1 * (net.bucket_len(bidx(BucketKind::C1)) as f64)
-        } else { 0.0 };
-        let r3 = if args.sd0 > 0.0 {
-            rho * args.sd0 * (net.bucket_len(bidx(BucketKind::D0)) as f64)
-        } else { 0.0 };
-        let r4 = if args.sd1 > 0.0 {
-            rho * args.sd1 * (net.bucket_len(bidx(BucketKind::D1)) as f64)
-        } else { 0.0 };
+        if args.stop_at_polarisation && net.bucket_is_empty(bidx(BucketKind::D1)) {
+            stopped_at_polarisation = true;
+            if !sampled_this_iter {
+                compute_stats(t.min(t_max), net.adj(), net.colour(), net.last_flip_times(), n);
+            }
+            break;
+        }
+
+        // Event rates (constants hoisted; an empty bucket gives rate 0.0 via
+        // multiplication by zero length, matching the old explicit guards)
+        let r0 = rate_flip * (net.bucket_len(bidx(BucketKind::D1)) as f64);
+        let r1 = rate_c0 * (net.bucket_len(bidx(BucketKind::C0)) as f64);
+        let r2 = rate_c1 * (net.bucket_len(bidx(BucketKind::C1)) as f64);
+        let r3 = rate_d0 * (net.bucket_len(bidx(BucketKind::D0)) as f64);
+        let r4 = rate_d1 * (net.bucket_len(bidx(BucketKind::D1)) as f64);
         let r_tot = r0 + r1 + r2 + r3 + r4;
         if r_tot <= 0.0 {
             absorbing_state = true;
@@ -331,13 +347,25 @@ fn main() {
         sim_steps += 1;
     }
 
-    // absorbing_state continuation handled inside loop when detected
+    // absorbing_state continuation handled inside loop when detected.
+    // In the natural-exit case (t reached t_max without polarising or
+    // hitting an absorbing state), the sample at exactly t_max was never
+    // taken because the while-loop check t < t_max exits first. Write it
+    // here so the CSV always ends with the final state.
+    if !stopped_at_polarisation && !absorbing_state {
+        compute_stats(t_max, net.adj(), net.colour(), net.last_flip_times(), n);
+    }
 
     // Final progress update
     pb.set_position(total_ticks);
     update_bar(&pb, t, net.present_edges(), net.ones_count(), denom_pairs, n);
     flush_stats();
-    if absorbing_state {
+    if stopped_at_polarisation {
+        pb.finish_with_message(format!(
+            "Done (polarised). t={:.6}, steps={}, flips={}, elapsed={:?}",
+            t, sim_steps, sim_steps_v, started.elapsed()
+        ));
+    } else if absorbing_state {
         pb.finish_with_message(format!(
             "Done (absorbing). t={:.6}, steps={}, flips={}, elapsed={:?}",
             t, sim_steps, sim_steps_v, started.elapsed()

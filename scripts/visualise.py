@@ -157,6 +157,67 @@ def add_triangle_normalised(df: pd.DataFrame, n: int) -> dict[str,pd.Series]:
     return res
 
 
+def plot_critical_beta_summary(df: pd.DataFrame, args, path: Path) -> None:
+    required = {'beta', 'mean_abs_dev_from_0_5', 'sd_abs_dev_from_0_5'}
+    if not required.issubset(df.columns):
+        print('Missing required columns for critical-beta summary mode.', file=sys.stderr)
+        sys.exit(1)
+
+    work = df.copy()
+    work['beta'] = pd.to_numeric(work['beta'], errors='coerce')
+    work['mean_abs_dev_from_0_5'] = pd.to_numeric(work['mean_abs_dev_from_0_5'], errors='coerce')
+    work['sd_abs_dev_from_0_5'] = pd.to_numeric(work['sd_abs_dev_from_0_5'], errors='coerce')
+    work = work.dropna(subset=['beta', 'mean_abs_dev_from_0_5', 'sd_abs_dev_from_0_5']).sort_values('beta')
+    if work.empty:
+        print('No valid rows in critical-beta summary CSV.', file=sys.stderr)
+        sys.exit(1)
+
+    if args.ratio:
+        try:
+            w_str, h_str = args.ratio.split(':', 1)
+            w_ratio = float(w_str)
+            h_ratio = float(h_str)
+            if w_ratio <= 0 or h_ratio <= 0:
+                raise ValueError
+            fig_w = 9.0
+            fig_h = fig_w * (h_ratio / w_ratio)
+        except ValueError:
+            print(f"Invalid --ratio '{args.ratio}'. Expected W:H with positive numbers, e.g. 4:3", file=sys.stderr)
+            return
+    else:
+        fig_w, fig_h = 9.0, 4.8
+
+    fig, ax = plt.subplots(1, 1, figsize=(fig_w, fig_h))
+    ax.errorbar(
+        work['beta'],
+        work['mean_abs_dev_from_0_5'],
+        yerr=work['sd_abs_dev_from_0_5'],
+        fmt='o-',
+        capsize=3,
+        linewidth=max(1.0, float(args.linewidth)),
+        markersize=4,
+        color='#1f77b4',
+        label='mean ± sd',
+    )
+    ax.set_title('Critical Beta Scan')
+    ax.set_xlabel('beta')
+    ax.set_ylabel('mean |col1(t≈0.1) - 0.5|')
+    ax.grid(alpha=0.3)
+    ax.legend(loc='upper left', fontsize='x-small')
+    fig.tight_layout()
+
+    if args.out:
+        out_path = args.out if args.out.suffix else args.out.with_suffix('.png')
+    else:
+        out_path = path.parent / f"{path.stem}-plot.png"
+
+    fig.savefig(out_path, dpi=args.dpi)
+    print(f'Wrote {out_path}')
+    if args.show:
+        plt.show()
+    plt.close(fig)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Plot simulation CSV")
     ap.add_argument('csv', nargs='?', type=Path, help='CSV file (optional)')
@@ -175,6 +236,9 @@ def main():
     ap.add_argument('--3stars', dest='three_stars', action='store_true', help='Show 3-star panel from 3s*_*** columns')
     ap.add_argument('--all', action='store_true', help='Enable all subgraph panels (triangles, 2-paths, 3-paths, 3-stars)')
     ap.add_argument('--projections', action='store_true', help='Overlay composition-based projections (dotted) on triangles and two-paths panels')
+    ap.add_argument('--conc-disc', dest='conc_disc', action='store_true', help='Show concordant-minus-discordant edge density panel with projection p_t*(1-2 q_t)^2 (dashed)')
+    ap.add_argument('--hide-non-edges', dest='hide_non_edges', action='store_true', help='Hide non-edge lines from edge density panel and use dynamic y-axis')
+    ap.add_argument('--show-parameters', dest='show_parameters', action='store_true', help='Add a panel at the top showing all simulation parameters from the CSV header')
     ap.add_argument('--pair', nargs=2, metavar=('P1', 'P2'), help='Plot comparison of two specific subgraph patterns (e.g. 3p0001 3s0_010)')
     # Triangles panel optional (raw counts)
     args = ap.parse_args()
@@ -205,6 +269,11 @@ def main():
     except ValueError:
         n = 0
     df = pd.read_csv(path, comment='#')
+    critical_required = {'beta', 'mean_abs_dev_from_0_5', 'sd_abs_dev_from_0_5'}
+    if critical_required.issubset(df.columns):
+        plot_critical_beta_summary(df, args, path)
+        return
+
     required = {'time','col0','col1','e00','e01','e11'}
     if not required.issubset(df.columns):
         print('Missing required columns for new schema.', file=sys.stderr)
@@ -219,7 +288,11 @@ def main():
     # --- Multi-panel layout ---
     three_paths_flag = args.three_paths
     three_stars_flag = args.three_stars
-    n_rows = 2 
+    n_rows = 2
+    if args.show_parameters:
+        n_rows += 1
+    if args.conc_disc:
+        n_rows += 1
     if args.triangles:
         n_rows += 1
     if args.two_paths:
@@ -246,8 +319,16 @@ def main():
     else:
         # Previous default total height ~ 3.2 * n_rows, so per-panel ~3.2
         panel_height = 3.2
-    total_height = panel_height * n_rows
-    fig, axes = plt.subplots(n_rows, 1, figsize=(panel_width, total_height), sharex=True)
+    # Parameter panel is shorter than data panels
+    param_panel_height = 1.2
+    data_rows = n_rows - (1 if args.show_parameters else 0)
+    total_height = panel_height * data_rows + (param_panel_height if args.show_parameters else 0)
+    if args.show_parameters:
+        height_ratios = [param_panel_height] + [panel_height] * data_rows
+        fig, axes = plt.subplots(n_rows, 1, figsize=(panel_width, total_height),
+                                 gridspec_kw={'height_ratios': height_ratios}, sharex=False)
+    else:
+        fig, axes = plt.subplots(n_rows, 1, figsize=(panel_width, total_height), sharex=True)
     # Normalise axes -> list of Axes
     if isinstance(axes, np.ndarray):
         axes = axes.ravel().tolist()
@@ -258,8 +339,32 @@ def main():
 
     tvals = df['time']
 
-    # Panel 1: colour fractions
+    # Panel 0 (optional): parameters
     row_idx = 0
+    if args.show_parameters:
+        axp = axes[row_idx]
+        row_idx += 1
+        axp.axis('off')
+        # Format parameters as wrapped key=value pairs
+        param_text = '  '.join(f'{k}={v}' for k, v in params.items())
+        # Wrap into lines of ~100 chars each
+        words = param_text.split('  ')
+        lines, current = [], ''
+        for w in words:
+            if len(current) + len(w) + 2 > 100 and current:
+                lines.append(current.rstrip())
+                current = w + '  '
+            else:
+                current += w + '  '
+        if current.rstrip():
+            lines.append(current.rstrip())
+        text = '\n'.join(lines)
+        axp.text(0.01, 0.95, text, transform=axp.transAxes,
+                 fontsize=7, verticalalignment='top', fontfamily='monospace',
+                 wrap=True, bbox=dict(boxstyle='round', facecolor='#f0f0f0', alpha=0.6))
+        axp.set_title('Simulation Parameters')
+
+    # Panel 1: colour fractions
     axc = axes[row_idx]
     row_idx += 1
     axc.plot(tvals, df['col0'], label='Colour 0', color='#44c774', linewidth=args.linewidth)
@@ -288,21 +393,50 @@ def main():
     axe.plot(tvals, total_frac, label='Total Edge Density', color='black', zorder=3, linewidth=args.linewidth)
     axe.plot(tvals, concord_frac, label='Concordant Edge Density (0–0, 1–1)', color='#ffbe83', linewidth=args.linewidth)
     axe.plot(tvals, discord_frac, label='Discordant Edge Density (0–1)', color='#df4d70', linewidth=args.linewidth)
-    axe.plot(tvals, df['ne00'] + df['ne11'], label='Concordant Non-Edge Density (0 0, 1 1)', color='#ffbe83', linestyle='dashed', linewidth=args.linewidth)
-    axe.plot(tvals, df['ne01'], label='Discordant Non-Edge Density (0 1)', color='#df4d70', linestyle='dashed', linewidth=args.linewidth)
-    # if args.projections:
-    #     # Projection: 2 * q * (1-p) * p where q=col1, p=total_edge_density
-    #     q = df['col1']
-    #     p = total_frac
-    #     proj_discord = (q**2 + (1 - q)**2 )
-    #     axe.plot(tvals, proj_discord, label='Discordant Edge Projection', color=darken_color('#df4d70'), linestyle='dotted', linewidth=args.linewidth)
-
-    # axe.plot(tvals, df['col0']**2+df['col1']**2, label='Sum of Colour Squares', color='#888888', zorder=2, linewidth=0.5)
+    if not args.hide_non_edges:
+        axe.plot(tvals, df['ne00'] + df['ne11'], label='Concordant Non-Edge Density (0 0, 1 1)', color='#ffbe83', linestyle='dashed', linewidth=args.linewidth)
+        axe.plot(tvals, df['ne01'], label='Discordant Non-Edge Density (0 1)', color='#df4d70', linestyle='dashed', linewidth=args.linewidth)
     axe.set_title('Edge Densities')
     axe.set_ylabel('Fraction of Edges')
-    axe.set_ylim(0,1)
+    if args.hide_non_edges:
+        edge_max = max(total_frac.max(), concord_frac.max(), discord_frac.max())
+        axe.set_ylim(0, edge_max * 1.1 if edge_max > 0 else 1.0)
+    else:
+        axe.set_ylim(0, 1)
     axe.grid(alpha=0.3)
     axe.legend(loc='upper right', fontsize='x-small')
+
+    # Optional panel: concordant minus discordant edge density vs projection
+    if args.conc_disc:
+        axcd = axes[row_idx]
+        row_idx += 1
+        diff = concord_frac - discord_frac
+        # Projection: p_t * (1 - 2 c_t)^2 with p_t the total edge density and
+        # c_t the colour-1 fraction. Under the mean-field projection
+        # concordant ~ p(c0^2+c1^2), discordant ~ p*2 c0 c1, so the difference
+        # equals p(c0-c1)^2 = p(1-2 c1)^2.
+        proj = total_frac * (1.0 - 2.0 * df['col1'])**2
+        axcd.plot(tvals, proj, label=r'Projection $p_t(1-2c_t)^2$', color=darken_color('#2166ac'), linestyle='dashed', linewidth=args.linewidth)
+        axcd.plot(tvals, diff, label='Concordant − Discordant', color='#2166ac', zorder=3, linewidth=args.linewidth)
+        # Zero reference plotted in data coordinates (not axhline) so the
+        # --split-panels exporter, which copies raw line xdata, reproduces it
+        # faithfully instead of mapping axhline's [0,1] axes-fraction xdata
+        # onto data coordinates.
+        axcd.plot(tvals, np.zeros_like(tvals), color='grey', linewidth=0.5, alpha=0.5)
+        axcd.set_title('Concordant − Discordant Edge Density')
+        axcd.set_ylabel('Edge Density Difference')
+        try:
+            lo = float(min(diff.min(), proj.min()))
+            hi = float(max(diff.max(), proj.max()))
+        except Exception:
+            lo, hi = 0.0, 1.0
+        if not (np.isfinite(lo) and np.isfinite(hi)) or hi <= lo:
+            axcd.set_ylim(-1, 1)
+        else:
+            pad = 0.1 * (hi - lo) if hi > lo else 0.1
+            axcd.set_ylim(lo - pad, hi + pad)
+        axcd.grid(alpha=0.3)
+        axcd.legend(loc='upper right', fontsize='x-small')
 
     # Optional panel 3: two-path densities
     if args.two_paths:
@@ -644,9 +778,10 @@ def main():
             sub_fig_ax.grid(alpha=0.3)
             if ax.get_legend() is not None:
                 sub_fig_ax.legend(loc='upper right', fontsize='x-small')
-            # Enforce [0,1] y-limits for the first two panels (colour fractions, edge densities)
-            if idx in (1,2):
-                sub_fig_ax.set_ylim(0,1)
+            # Enforce [0,1] y-limits for colour and edge density panels
+            param_offset = 1 if args.show_parameters else 0
+            if idx in (1 + param_offset, 2 + param_offset):
+                sub_fig_ax.set_ylim(0, 1)
             panel_path = parent / f"{stem}-{idx}{ext}"
             sub_fig.tight_layout()
             sub_fig.savefig(panel_path, dpi=args.dpi)

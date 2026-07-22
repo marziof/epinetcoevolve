@@ -1,164 +1,204 @@
 # netcoevolve
 
-Fast Rust implementation of the stochastic co-evolving network simulation introduced in the article ["Co-evolving vertex and edge dynamics in dense graphs"](https://arxiv.org/abs/2504.06493) by S. Athreya, F. Hollander, A. Röllin. Includes a Python visualisation script for plotting time series of various subgraph densities.
+`netcoevolve` is a fast Rust implementation of the stochastic co-evolving network model introduced in ["Co-evolving vertex and edge dynamics in dense graphs"](https://arxiv.org/abs/2504.06493) by S. Athreya, F. den Hollander, and A. Röllin. It simulates a dense undirected graph whose vertices have one of two colours and writes colour, edge, and coloured-motif densities to CSV.
 
-## Build Requirements
-- Rust (stable) with Cargo (edition 2021).
-- Python 3.9+ (for visualisation) with packages: `pandas`, `matplotlib` (and `numpy`, installed as a dependency).
+## Requirements
 
-## Building
-In order to compile the project with all optimizations turned on, run:
+- Rust stable with Cargo (edition 2021).
+- Python 3.10 or newer for the optional analysis tools.
+- The Python packages in `scripts/requirements.txt` (`pandas` and `matplotlib`; these install NumPy as a dependency).
+- Tkinter for `scripts/dispatch.py`; FFmpeg is optional for MP4 output from `scripts/analyse.py`.
+
+Install the Python dependencies with:
+
+```bash
+python -m pip install -r scripts/requirements.txt
+```
+
+## Build
+
+Build the optimized binary with:
+
 ```bash
 cargo build --release
 ```
-The optimized binary will be at `target/release/netcoevolve`.
 
-The development version can be compiled with
-```bash
-cargo build
-```
-but it will include debug information and no optimizations.
+The binary is written to `target/release/netcoevolve`. A development build can be produced with `cargo build`, but it is much slower for simulations.
 
-## Running the Simulation
-Basic run (defaults):
+## Simulation model
+
+Every unordered vertex pair belongs to one of four buckets:
+
+| Bucket | Vertex colours | Edge state |
+|---|---|---|
+| `C0` | concordant (equal) | absent |
+| `C1` | concordant (equal) | present |
+| `D0` | discordant (different) | absent |
+| `D1` | discordant (different) | present |
+
+The simulator uses the Gillespie direct method. Edge transitions have the following per-pair rates:
+
+| Transition | Per-pair rate |
+|---|---|
+| `C0 -> C1` | `rho * sc0` |
+| `C1 -> C0` | `rho * sc1` |
+| `D0 -> D1` | `rho * sd0` |
+| `D1 -> D0` | `rho * sd1` |
+
+Each `D1` edge triggers colour flips at total rate `2 * eta`; one of its endpoints is selected uniformly, so each endpoint is selected at rate `eta` through that edge. A colour flip reclassifies all pairs incident to that vertex.
+
+## Run
+
+Run with all defaults:
+
 ```bash
 ./target/release/netcoevolve
 ```
+
 Example with custom parameters:
+
 ```bash
 ./target/release/netcoevolve \
-  --n 500 --eta 1.0 --rho 2.0\
+  --n 500 --eta 1.0 --rho 2.0 \
   --sd0 0.0 --sd1 1.0 --sc0 0.0 --sc1 1.0 \
+  --p1 0.5 --p00 0.5 --p01 0.5 --p11 0.5 \
   --sample_delta 0.01 --t_max 5.0 --seed 42
 ```
 
-### CLI Parameters
+Use `./target/release/netcoevolve --help` to see the CLI help.
 
-Parameters to control simulation dynamics:
-
-| Flag | Meaning | Default |
-|------|---------|---------|
-| `--n` | Number of vertices | 1000 |
-| `--eta` | Colour-flip driver | 1.0 |
-| `--rho` | Global edge event rate multiplier (mutually exclusive with `--beta`) | 1.0 |
-| `--beta` | Convenience: sets `rho = n` and `eta = beta` | (none) |
-| `--sd0` | Rate multiplier: discordant absent -> present | 0.7 |
-| `--sd1` | Rate multiplier: discordant present -> absent | 2.0 |
-| `--sc0` | Rate multiplier: concordant absent -> present | 1.5 |
-| `--sc1` | Rate multiplier: concordant present -> absent | 0.3 |
-
-
-Parameters to initialise the graph at time 0:
+### Dynamics parameters
 
 | Flag | Meaning | Default |
-|------|---------|---------|
-| `--p1` | Probability that a vertex has colour 1 | 0.5 |
-| `--p00` | Edge probability between two colour-0 vertices | 0.2 |
-| `--p01` | Edge probability between different-colour vertices | 0.8 |
-| `--p11` | Edge probability between two colour-1 vertices | 0.2 |
+|---|---|---|
+| `--n` | Number of vertices; must be at least 2 | `1000` |
+| `--rho` | Common edge-event rate multiplier | `1.0` |
+| `--eta` | Colour-flip rate per endpoint of each discordant present edge | `1.0` |
+| `--beta` | Scaling shortcut: require `beta > 0`, set `rho = n`, and replace `eta` with `beta`; cannot be combined with `--rho` | not set |
+| `--sd0` | Discordant absent-to-present multiplier | `0.7` |
+| `--sd1` | Discordant present-to-absent multiplier | `2.0` |
+| `--sc0` | Concordant absent-to-present multiplier | `1.5` |
+| `--sc1` | Concordant present-to-absent multiplier | `0.3` |
 
-Parameters for simulation control:
+### Initial state
+
+Vertex colours are initialized independently. Conditional on those colours, edges are also initialized independently.
 
 | Flag | Meaning | Default |
-|------|---------|---------|
-| `--sample_delta` | Time between statistic samples | 0.01 |
-| `--t_max` | Maximum simulation time | 1.0 |
-| `--seed` | RNG seed (integer) or `random` (time-based 0..65535) | 42 |
-| `--output` | CSV filename | output/simulation-\<timestamp\>.csv |
-| `--dump_adj` | Save adjacency matrix snapshots to a subdirectory | (disabled) |
+|---|---|---|
+| `--p1` | Probability that a vertex initially has colour 1 | `0.5` |
+| `--p00` | Initial edge probability between two colour-0 vertices | `0.5` |
+| `--p01` | Initial edge probability between differently coloured vertices | `0.5` |
+| `--p11` | Initial edge probability between two colour-1 vertices | `0.5` |
 
-## Python Scripts Reference
+### Sampling and output
 
-The `scripts/` directory contains tools for visualisation, analysis, and batch execution.
+| Flag | Meaning | Default |
+|---|---|---|
+| `--sample_delta` | Interval between simulation-time sampling thresholds | `0.01` |
+| `--t_max` | Simulation end time | `1.0` |
+| `--seed` | Unsigned integer RNG seed, or `random` for a time-derived seed in `0..65535` | `42` |
+| `--output` | Output CSV path | `output/simulation-<timestamp>.csv` |
+| `--dump_adj` | Write an adjacency snapshot for every recorded sample | disabled |
+| `--stop_at_polarisation` | Stop as soon as there are no discordant present edges (`D1` is empty) | disabled |
 
-### `scripts/analyse.py`
-Unified CLI for processing adjacency snapshots (requires `--dump_adj`).
+The CSV starts with comment lines containing the package version and all resolved parameters, followed by columns for:
 
-**Usage:** `python scripts/analyse.py <subcommand> [directory] [options]`
+- time, colour fractions, and present/absent edge densities by colour pattern;
+- coloured triangle and 2-path homomorphism densities;
+- coloured 3-path and 3-star homomorphism densities.
 
-**Subcommands:**
-*   `animate`: Render an animation of the network's adjacency matrix.
-*   `diagnostics`: Compute spectral and rank-1 approximation metrics.
-*   `info`: Summarize dataset metadata (frame count, n, time range).
-*   `correlations`: Compute vertex & edge correlations vs a reference time.
+There is an initial sample at time 0. During a non-absorbing run, sampling is triggered as simulation time passes successive `sample_delta` thresholds; because events occur at random times, recorded times need not lie exactly on that grid. A final row labelled `t_max` is also written unless `--stop_at_polarisation` ends the run earlier.
 
-**Common Options:**
-*   `--order <mode>`: Reordering mode for vertices (`none`, `global-degree`, `degree`, `in-degree`, `out-degree`).
-*   `--quiet`: Suppress output.
-*   `--no-progress`: Hide progress bar.
+With `--dump_adj`, an output such as `output/run.csv` gets a sibling directory named `output/run-adj/`. Each text snapshot contains the parameter header, the vertex-colour bit string, and the adjacency matrix in original vertex order.
 
-**Animation Options:**
-*   `--out <file>`: Output file (`.mp4` or `.gif`).
-*   `--interval <ms>`: Delay between frames.
-*   `--avg <k>`: Apply k×k averaging kernel for smoothing.
-*   `--group-lines`: Draw lines at community boundaries.
+If the total event rate becomes zero, the state is absorbing. The simulator writes the unchanged state at all remaining sampling times through `t_max` and marks the final progress message with `(absorbing)`. With `--stop_at_polarisation`, the stopping state is recorded and the final message is marked `(polarised)`.
 
-**Diagnostics Options:**
-*   `--rank1`: Compute global rank-1 closeness metrics.
-*   `--extended`: Add block-level spectral metrics and correlations.
-*   `--csv <file>`: Write metrics to CSV.
+## Python tools
+
+The maintained package tools directly under `scripts/` are the following. Experiment-specific scans and one-off plotting scripts live in `scripts/adhoc/` and are not part of the package interface.
 
 ### `scripts/visualise.py`
-Plots time series of edge densities, colour fractions, and subgraph densities from a simulation CSV.
 
-**Usage:** `python scripts/visualise.py [csv_file] [options]`
+Plot colour fractions, edge densities, and optional motif densities from a simulation CSV. If the CSV argument is omitted, the newest `simulation-*.csv` in the current directory or `output/` is used.
 
-**Options:**
-*   `--out <file>`: Save plot to file (default: `<csv_stem>-plot.png`).
-*   `--show`: Display the plot interactively.
-*   `--split-panels`: Save each panel as a separate image.
-*   `--triangles`: Show triangle density panel.
-*   `--2paths`: Show 2-path density panel.
-*   `--3paths`: Show 3-path density panel.
-*   `--3stars`: Show 3-star density panel.
-*   `--all`: Enable all subgraph panels.
-*   `--projections`: Overlay theoretical projections (dotted lines).
-*   `--ratio <W:H>`: Set aspect ratio for panels.
+```bash
+python scripts/visualise.py [csv_file] [options]
+```
+
+Useful options include:
+
+- `--out FILE`, `--show`, `--split-panels`, `--dpi N`, and `--ratio W:H` for output control;
+- `--triangles`, `--2paths`, `--3paths`, `--3stars`, or `--all` for motif panels;
+- `--projections` for composition-based motif projections;
+- `--conc-disc` for the concordant-minus-discordant edge panel;
+- `--hide-non-edges`, `--no-partitions`, and `--show-parameters` for display control;
+- `--pair PATTERN1 PATTERN2` to compare two specific motif patterns.
+
+### `scripts/analyse.py`
+
+Analyse adjacency snapshots produced by `--dump_adj`.
+
+```bash
+python scripts/analyse.py <subcommand> <snapshot-directory> [options]
+```
+
+Implemented subcommands are:
+
+- `animate`: render an MP4 or GIF of the adjacency matrices;
+- `diagnostics`: compute spectral, rank-1, and optional extended block metrics;
+- `info`: summarize the snapshot set;
+- `correlations`: compute vertex and edge correlations relative to a reference time.
+
+Run `python scripts/analyse.py <subcommand> --help` for frame selection, vertex ordering, smoothing, and export options. The `frames`, `permutation`, and `verify` subcommands currently exist only as stubs.
 
 ### `scripts/polarisation.py`
-Scans a directory of simulation outputs to detect polarisation events (stabilisation of colour fractions).
 
-**Usage:** `python scripts/polarisation.py [options]`
+Summarize polarisation across the simulation CSV files directly inside a directory:
 
-**Options:**
-*   `--dir <path>`: Directory containing simulation CSVs (default: `output`).
-*   `--k <int>`: Number of final rows to check for stability (default: 10).
-*   `--out <file>`: Output summary CSV (default: `polarisation-summary.csv`).
+```bash
+python scripts/polarisation.py --dir output --k 10
+```
+
+`--k` is the number of final rows used for the stability test. The default output is `<dir>/polarisation.csv`; use `--out FILE` to change it.
 
 ### `scripts/dispatch.py`
-A Tkinter-based GUI for managing batch simulations. Useful for exploring parameter spaces (e.g., varying `n` and `eta`).
 
-**Usage:** `python scripts/dispatch.py`
+Launch the Tkinter GUI for concurrent parameter sweeps:
 
-**Features:**
-*   Concurrent execution of multiple simulation jobs.
-*   Live progress tracking for each job.
-*   Automatic file naming and organization.
-*   Parameter sweep configuration (n, eta).
-
-## Figures from the article
-
-A simulation similar to Figure 1 of the article "Co-evolving vertex and edge dynamics in dense graphs" can be obtained by running
 ```bash
-./target/release/netcoevolve --n 1000 --eta 1.0 --rho 1.1 --sc0 1.5 --sd0 0.7 --sc1 0.5 --sd1 2.0 --sample_delta 0.005 --t_max 3.0 --seed 61
-python scripts/visualise.py --out plot.png --split-panels
+python scripts/dispatch.py
 ```
 
-A simulation similar to Figure 2, where polarisation occurs, can be obtained by running
+The GUI configures the binary, output directory, worker count, repetitions, `n` values, an `eta` range, and fixed simulation parameters. It uses Unix PTYs and is intended for macOS or Linux.
+
+## Article examples
+
+A run similar to Figure 1 of the article can be produced with:
+
 ```bash
-./target/release/netcoevolve --n 1000 --eta 1.0 --rho 2.0 --sc0 0.0 --sd0 0.0 --sc1 1.0 --sd1 1.0 --sample_delta 0.005 --t_max 3.0 --seed 17
-python scripts/visualise.py --out plot.png --split-panels
+./target/release/netcoevolve \
+  --n 1000 --eta 1.0 --rho 1.1 \
+  --sc0 1.5 --sd0 0.7 --sc1 0.5 --sd1 2.0 \
+  --sample_delta 0.005 --t_max 3.0 --seed 61 \
+  --output output/figure-1.csv
+python scripts/visualise.py output/figure-1.csv --out plot-1.png --split-panels
 ```
 
+A polarising run similar to Figure 2 can be produced with:
 
+```bash
+./target/release/netcoevolve \
+  --n 1000 --eta 1.0 --rho 2.0 \
+  --sc0 0.0 --sd0 0.0 --sc1 1.0 --sd1 1.0 \
+  --sample_delta 0.005 --t_max 3.0 --seed 17 \
+  --output output/figure-2.csv
+python scripts/visualise.py output/figure-2.csv --out plot-2.png --split-panels
+```
 
-## Absorbing States
-If the system reaches a state with zero total event rate (no colour flips or edge changes possible under the current parameters), the simulation flags an absorbing state and keeps emitting samples at the frozen configuration until `t_max`. The final progress message is annotated with `(absorbing)`.
+## Performance and reproducibility
 
-## Performance Notes
-- Use `--release` for meaningful speed (LTO and optimizations configured in `Cargo.toml`).
-- Stats sampling cost grows mainly with building block matrices; increasing `SAMPLE_DELTA` reduced overhead, but also makes the statistics less granular.
-
-## Reproducibility
-- All simulation parameters (including the resolved seed, and effective `rho` when using `--beta`) are printed to stdout and embedded in the CSV comment line.
-- `--seed=random` still yields a deterministic run once the printed seed value is reused.
+- Use the release build for meaningful performance; `Cargo.toml` enables optimization and link-time optimization.
+- Motif statistics are relatively expensive. Increasing `--sample_delta` reduces sampling overhead at the cost of time resolution.
+- The simulator uses `Xoshiro256++`. It prints the resolved seed and parameters and stores them in the CSV header.
+- A run started with `--seed=random` is reproducible by reusing the resolved integer seed printed at startup.

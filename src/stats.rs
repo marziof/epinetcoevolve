@@ -41,14 +41,12 @@ pub fn compute_stats(t: f64, adj: &[u8], colour: &[u8], last_flip: &[f64], n: us
     let mut a01 = faer::Mat::<f32>::zeros(c0, c1);
 
     for ii in 0..c0 {
-        a00[(ii,ii)] = 0.0;
         for jj in (ii+1)..c0 {
             let u = idx0[ii]; let v = idx0[jj];
             if adj[u*n + v] != 0 { a00[(ii,jj)] = 1.0; a00[(jj,ii)] = 1.0; }
         }
     }
     for ii in 0..c1 {
-        a11[(ii,ii)] = 0.0;
         for jj in (ii+1)..c1 {
             let u = idx1[ii]; let v = idx1[jj];
             if adj[u*n + v] != 0 { a11[(ii,jj)] = 1.0; a11[(jj,ii)] = 1.0; }
@@ -59,11 +57,25 @@ pub fn compute_stats(t: f64, adj: &[u8], colour: &[u8], last_flip: &[f64], n: us
         for jj in 0..c1 { let v = idx1[jj]; if adj[u*n + v] != 0 { a01[(ii,jj)] = 1.0; } }
     }
 
-    let sum_sym  = |m: &faer::Mat<f32>| -> f64 { let mut s=0.0; for i in 0..m.nrows() { for j in 0..m.ncols() { s += m[(i,j)] as f64; } } s };
-    let sum_rect = |m: &faer::Mat<f32>| -> f64 { let mut s=0.0; for i in 0..m.nrows() { for j in 0..m.ncols() { s += m[(i,j)] as f64; } } s };
-    let sum00 = sum_sym(&a00); // counts undirected edges twice
-    let sum11 = sum_sym(&a11);
-    let sum01 = sum_rect(&a01); // cross once
+    // Degrees by colour for each vertex, computed up-front (column-major sweeps,
+    // contiguous in faer's storage). The matrix sums needed for the edge
+    // densities follow directly from the degrees, which removes the two extra
+    // full-matrix passes of the old version.
+    let mut deg00: Vec<f64> = vec![0.0; c0];
+    let mut deg01: Vec<f64> = vec![0.0; c0];
+    let mut deg10: Vec<f64> = vec![0.0; c1];
+    let mut deg11: Vec<f64> = vec![0.0; c1];
+    for j in 0..c0 { for i in 0..c0 { deg00[i] += a00[(i,j)] as f64; } }
+    for j in 0..c1 { for i in 0..c0 { deg01[i] += a01[(i,j)] as f64; } }
+    for j in 0..c1 {
+        let mut s = 0.0;
+        for i in 0..c0 { s += a01[(i,j)] as f64; }
+        deg10[j] = s;
+    }
+    for j in 0..c1 { for i in 0..c1 { deg11[i] += a11[(i,j)] as f64; } }
+    let sum00: f64 = deg00.iter().sum(); // counts undirected edges twice
+    let sum11: f64 = deg11.iter().sum();
+    let sum01: f64 = deg01.iter().sum(); // cross once
     // Normalise by total number of vertex pairs (n choose 2)
     let n_pairs = (n as f64) * (n as f64 - 1.0) / 2.0;
     let e00 = if c0 > 1 { (0.5 * sum00) / n_pairs } else { 0.0 };
@@ -78,9 +90,16 @@ pub fn compute_stats(t: f64, adj: &[u8], colour: &[u8], last_flip: &[f64], n: us
     } else { 0.0 };
     let ne01 = if c0 > 0 && c1 > 0 { ((c0 as f64 * c1 as f64) - sum01) / n_pairs } else { 0.0 };
 
+    // tr(A^3) = sum_{i,j} A2[i,j] * A[i,j] for symmetric A, so the second
+    // O(n^3) matmul of the old version (A2 * A) is replaced by an O(n^2)
+    // elementwise pass. Entries are small exact integers in f32/f64, so the
+    // result is bit-identical. Iteration is column-major to match faer's layout.
     fn tri_count_f(a: &faer::Mat<f32>) -> f64 {
-        let n=a.nrows(); if n<3 { return 0.0; }
-        let a2 = a * a; let a3 = &a2 * a; let mut tr=0.0; for i in 0..n { tr += a3[(i,i)] as f64; } tr / 6.0
+        let n = a.nrows(); if n < 3 { return 0.0; }
+        let a2 = a * a;
+        let mut tr = 0.0f64;
+        for j in 0..n { for i in 0..n { tr += (a2[(i, j)] as f64) * (a[(i, j)] as f64); } }
+        tr / 6.0
     }
     let cyc000_count = tri_count_f(&a00);
     let cyc111_count = tri_count_f(&a11);
@@ -88,10 +107,11 @@ pub fn compute_stats(t: f64, adj: &[u8], colour: &[u8], last_flip: &[f64], n: us
     let a01_t = a01.as_ref().transpose();
     let c_mat = &a01 * &a01_t; // c0 x c0
     let d_mat = &a01_t * &a01; // c1 x c1
+    // Column-major upper-triangle sweeps (contiguous in faer's storage).
     let mut cyc001_count = 0.0f64;
-    for i in 0..c0 { for j in (i+1)..c0 { if a00[(i,j)] != 0.0 { cyc001_count += c_mat[(i,j)] as f64; } } }
+    for j in 1..c0 { for i in 0..j { if a00[(i,j)] != 0.0 { cyc001_count += c_mat[(i,j)] as f64; } } }
     let mut cyc011_count = 0.0f64;
-    for p in 0..c1 { for q in (p+1)..c1 { if a11[(p,q)] != 0.0 { cyc011_count += d_mat[(p,q)] as f64; } } }
+    for q in 1..c1 { for p in 0..q { if a11[(p,q)] != 0.0 { cyc011_count += d_mat[(p,q)] as f64; } } }
 
     // Homomorphism densities migration:
     //  - Triangles: hom(K3_col,G) = 6 * (#colour-pattern triangles) / n^3.
@@ -100,13 +120,7 @@ pub fn compute_stats(t: f64, adj: &[u8], colour: &[u8], last_flip: &[f64], n: us
     //  - 3-stars centre colour c with leaf multiset (k ones): sum d0^{3-k} d1^{k} / n^4 (leaves treated as labelled in hom definition).
 
     let n_f = n as f64;
-    // Degrees by colour for each vertex
-    let mut deg00: Vec<f64> = vec![0.0; c0];
-    let mut deg01: Vec<f64> = vec![0.0; c0];
-    for i in 0..c0 { for j in 0..c0 { deg00[i] += a00[(i,j)] as f64; } for j in 0..c1 { deg01[i] += a01[(i,j)] as f64; } }
-    let mut deg10: Vec<f64> = vec![0.0; c1];
-    let mut deg11: Vec<f64> = vec![0.0; c1];
-    for j in 0..c1 { for k in 0..c1 { deg11[j] += a11[(j,k)] as f64; } for i in 0..c0 { deg10[j] += a01[(i,j)] as f64; } }
+    // (degrees deg00/deg01/deg10/deg11 already computed above)
 
     // Triangle hom densities (replace previous injective densities)
     let cyc000 = if n>=3 { (6.0 * cyc000_count) / (n_f.powi(3)) } else { 0.0 };
@@ -139,43 +153,47 @@ pub fn compute_stats(t: f64, adj: &[u8], colour: &[u8], last_flip: &[f64], n: us
                   (0,1,0,1)=>Some(4),(0,1,1,0)=>Some(5),(0,1,1,1)=>Some(6),(1,0,0,1)=>Some(7),
                   (1,0,1,1)=>Some(8),(1,1,1,1)=>Some(9), _=>None }
     }
-    // helper closures to get d0/d1 for colour+index
-    let d0_zero = |i:usize| deg00[i];
-    let d1_zero = |i:usize| deg01[i];
-    let d0_one  = |j:usize| deg10[j];
-    let d1_one  = |j:usize| deg11[j];
+    // Pattern -> p3-slot lookup tables, hoisted out of the edge loops
+    // (previously canonical_index was re-evaluated per edge per pattern).
+    const SS: [(u8, u8); 4] = [(0,0),(0,1),(1,0),(1,1)];
+    let mut k00 = [0usize; 4]; let mut k11 = [0usize; 4];
+    let mut k01 = [0usize; 4]; let mut k10 = [0usize; 4];
+    for m in 0..4 {
+        let (s0, s3) = SS[m];
+        k00[m] = canonical_index((s0,0,0,s3)).unwrap();
+        k11[m] = canonical_index((s0,1,1,s3)).unwrap();
+        k01[m] = canonical_index((s0,0,1,s3)).unwrap();
+        k10[m] = canonical_index((s0,1,0,s3)).unwrap();
+    }
+    // Edge sweeps below are column-major (contiguous in faer's storage).
+    // Both path orientations through each edge are accumulated together;
+    // all intermediate values are exact integers so results are unchanged.
     // zero-zero edges
-    for i in 0..c0 { for j in (i+1)..c0 { if a00[(i,j)]==0.0 { continue; }
-        for &(s0, s3) in &[(0u8,0u8),(0,1),(1,0),(1,1)] {
-            // direction i->j and j->i both contribute; canonicalization merges reverses.
-            let left = if s0==0 { d0_zero(i) } else { d1_zero(i) };
-            let right= if s3==0 { d0_zero(j) } else { d1_zero(j) };
-            if let Some(k) = canonical_index((s0,0,0,s3)) { p3[k] += left*right; }
-            let left2 = if s0==0 { d0_zero(j) } else { d1_zero(j) };
-            let right2= if s3==0 { d0_zero(i) } else { d1_zero(i) };
-            if let Some(k) = canonical_index((s0,0,0,s3)) { p3[k] += left2*right2; }
+    for j in 1..c0 { for i in 0..j { if a00[(i,j)]==0.0 { continue; }
+        let di = [deg00[i], deg01[i]];
+        let dj = [deg00[j], deg01[j]];
+        for m in 0..4 {
+            let (s0, s3) = (SS[m].0 as usize, SS[m].1 as usize);
+            p3[k00[m]] += di[s0]*dj[s3] + dj[s0]*di[s3];
         }
     }}
     // one-one edges
-    for i in 0..c1 { for j in (i+1)..c1 { if a11[(i,j)]==0.0 { continue; }
-        for &(s0, s3) in &[(0u8,0u8),(0,1),(1,0),(1,1)] {
-            let left = if s0==0 { d0_one(i) } else { d1_one(i) };
-            let right= if s3==0 { d0_one(j) } else { d1_one(j) };
-            if let Some(k)=canonical_index((s0,1,1,s3)) { p3[k] += left*right; }
-            let left2 = if s0==0 { d0_one(j) } else { d1_one(j) };
-            let right2= if s3==0 { d0_one(i) } else { d1_one(i) };
-            if let Some(k)=canonical_index((s0,1,1,s3)) { p3[k] += left2*right2; }
+    for j in 1..c1 { for i in 0..j { if a11[(i,j)]==0.0 { continue; }
+        let di = [deg10[i], deg11[i]];
+        let dj = [deg10[j], deg11[j]];
+        for m in 0..4 {
+            let (s0, s3) = (SS[m].0 as usize, SS[m].1 as usize);
+            p3[k11[m]] += di[s0]*dj[s3] + dj[s0]*di[s3];
         }
     }}
     // zero-one edges (i zero, j one)
-    for i in 0..c0 { for j in 0..c1 { if a01[(i,j)]==0.0 { continue; }
-        for &(s0,s3) in &[(0u8,0u8),(0,1),(1,0),(1,1)] {
-            let left = if s0==0 { d0_zero(i) } else { d1_zero(i) };
-            let right= if s3==0 { d0_one(j) } else { d1_one(j) };
-            if let Some(k)=canonical_index((s0,0,1,s3)) { p3[k]+= left*right; }
-            let left2 = if s0==0 { d0_one(j) } else { d1_one(j) };
-            let right2= if s3==0 { d0_zero(i) } else { d1_zero(i) };
-            if let Some(k)=canonical_index((s0,1,0,s3)) { p3[k]+= left2*right2; }
+    for j in 0..c1 { for i in 0..c0 { if a01[(i,j)]==0.0 { continue; }
+        let di = [deg00[i], deg01[i]];
+        let dj = [deg10[j], deg11[j]];
+        for m in 0..4 {
+            let (s0, s3) = (SS[m].0 as usize, SS[m].1 as usize);
+            p3[k01[m]] += di[s0]*dj[s3];
+            p3[k10[m]] += dj[s0]*di[s3];
         }
     }}
     let denom_3p = n_f.powi(4);
@@ -235,7 +253,7 @@ impl CsvStatsWriter {
         let f = File::create(&path)?;
         let mut w = BufWriter::new(f);
         // Build the main header line first so we can reuse it in adjacency snapshot files verbatim.
-        let header_line = format!("# netcoevolve={} n={} rho={} eta={} beta={} sd0={} sd1={} sc0={} sc1={} p1={} p00={} p01={} p11={} sample_delta={} t_max={} seed={}{} output_file={}",
+        let header_line = format!("# netcoevolve={} n={} rho={} eta={} beta={} sd0={} sd1={} sc0={} sc1={} p1={} p00={} p01={} p11={} sample_delta={} t_max={} stop_at_polarisation={} seed={}{} output_file={}",
             env!("CARGO_PKG_VERSION"),
             args.n,
             args.rho.unwrap_or(1.0),
@@ -251,6 +269,7 @@ impl CsvStatsWriter {
             args.p11,
             args.sample_delta,
             args.t_max,
+            args.stop_at_polarisation,
             effective_seed,
             if seed_random { " (random)" } else { "" },
             path);
@@ -268,7 +287,7 @@ impl CsvStatsWriter {
         p000: f64, p001: f64, p010: f64, p011: f64, p101: f64, p111: f64,
         p3_0000: f64, p3_0001: f64, p3_0010: f64, p3_0011: f64, p3_0101: f64, p3_0110: f64, p3_0111: f64, p3_1001: f64, p3_1011: f64, p3_1111: f64,
         s0_000: f64, s0_001: f64, s0_011: f64, s0_111: f64, s1_000: f64, s1_001: f64, s1_011: f64, s1_111: f64) {
-        let _ = writeln!(self.w, "{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9}",
+        let _ = writeln!(self.w, "{:.9},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e}",
             t, col0, col1, e00, e01, e11, ne00, ne01, ne11, cyc000, cyc001, cyc011, cyc111, p000, p001, p010, p011, p101, p111,
             p3_0000, p3_0001, p3_0010, p3_0011, p3_0101, p3_0110, p3_0111, p3_1001, p3_1011, p3_1111,
             s0_000, s0_001, s0_011, s0_111, s1_000, s1_001, s1_011, s1_111);
