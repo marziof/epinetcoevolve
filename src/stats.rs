@@ -253,12 +253,13 @@ impl CsvStatsWriter {
         let f = File::create(&path)?;
         let mut w = BufWriter::new(f);
         // Build the main header line first so we can reuse it in adjacency snapshot files verbatim.
-        let header_line = format!("# netcoevolve={} n={} rho={} eta={} beta={} sd0={} sd1={} sc0={} sc1={} p1={} p00={} p01={} p11={} sample_delta={} t_max={} stop_at_polarisation={} seed={}{} output_file={}",
+        let header_line = format!("# netcoevolve={} n={} rho={} eta={} beta={} gamma={} sd0={} sd1={} sc0={} sc1={} p1={} p00={} p01={} p11={} sample_delta={} t_max={} stop_at_polarisation={} seed={}{} output_file={}",
             env!("CARGO_PKG_VERSION"),
             args.n,
             args.rho.unwrap_or(1.0),
             args.eta,
-            match args.beta { Some(b) => b.to_string(), None => "-".to_string() },
+            args.beta,
+            args.gamma,
             args.sd0,
             args.sd1,
             args.sc0,
@@ -275,9 +276,7 @@ impl CsvStatsWriter {
             path);
     writeln!(w, "{}", header_line)?;
     writeln!(w, "# coloured motif densities include symmetry multiplicities; sums across colour patterns recover uncoloured homomorphism densities for each motif family")?;
-        if let Some(beta) = args.beta {
-            writeln!(w, "# beta={} (eta=beta, rho=n)", beta)?;
-        }
+        writeln!(w, "# contact process rates: infection = eta*beta*#(1-neighbours)/n, recovery = eta*gamma")?;
     writeln!(w, "time,col0,col1,e00,e01,e11,ne00,ne01,ne11,3cyc000,3cyc001,3cyc011,3cyc111,2p000,2p001,2p010,2p011,2p101,2p111,3p0000,3p0001,3p0010,3p0011,3p0101,3p0110,3p0111,3p1001,3p1011,3p1111,3s0_000,3s0_001,3s0_011,3s0_111,3s1_000,3s1_001,3s1_011,3s1_111")?;
         Ok(Self { w, dump_adj, base_path: path, header_line })
     }

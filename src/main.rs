@@ -11,7 +11,7 @@
 
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
-use rand::{Rng, SeedableRng};
+use rand::{Rng, RngExt, SeedableRng};
 use rand_distr::{Distribution, Exp1};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use std::time::Instant;
@@ -43,9 +43,13 @@ struct Cli {
     #[arg(long = "rho")]
     rho: Option<f64>,
 
-    /// beta (sets rho = n and eta = beta)
-    #[arg(long = "beta")]
-    beta: Option<f64>,
+    /// beta (infection coefficient)
+    #[arg(long = "beta", default_value_t = 1.0)]
+    beta: f64,
+
+    /// gamma (recovery coefficient)
+    #[arg(long = "gamma", default_value_t = 1.0)]
+    gamma: f64,
 
     /// eta (base for discordant-present driven colour flips)
     #[arg(long = "eta", default_value_t = 1.0)]
@@ -154,16 +158,7 @@ fn main() {
     let n = args.n as usize;
     assert!(n >= 2, "N must be at least 2");
     
-    // Keep originals for display if beta provided
-    let mut rho = args.rho.unwrap_or(1.0);
-    if let Some(beta) = args.beta {
-        assert!(beta > 0.0, "beta must be > 0");
-        assert!(args.rho.is_none(), "Cannot specify both --rho and --beta");
-        // New semantics: when beta is set, set eta = beta and rho = n
-        args.eta = beta;             // eta equals beta
-        rho = n as f64;              // rho equals n
-        args.rho = Some(rho);        // reflect effective rho in args for stats
-    }
+    let rho = args.rho.unwrap_or(1.0);
 
     // Derived and display parameters (rho possibly overridden)
     let t_max = args.t_max;
@@ -195,13 +190,10 @@ fn main() {
     println!("  sample_delta   = {}", args.sample_delta);
     println!("  t_max          = {}", args.t_max);
     println!("  n              = {}", args.n);
-    if args.beta.is_some() {
-        println!("  rho            = {} = n", rho);
-        println!("  eta            = {} = beta", args.eta);
-    } else {
-        println!("  rho            = {}", rho);
-        println!("  eta            = {}", args.eta);
-    }
+    println!("  rho            = {}", rho);
+    println!("  eta            = {}", args.eta);
+    println!("  beta           = {}", args.beta);
+    println!("  gamma          = {}", args.gamma);
     println!("  sd0            = {}", args.sd0);
     println!("  sd1            = {}", args.sd1);
     println!("  sc0            = {}", args.sc0);
@@ -240,7 +232,8 @@ fn main() {
 
     // Loop-invariant rate constants (hoisted out of the simulation loop;
     // the <= 0 clamps preserve the old per-iteration guard semantics).
-    let rate_flip = args.eta * 2.0;
+    let rate_infection = args.eta * args.beta / (n as f64);
+    let rate_recovery = args.eta * args.gamma;
     let rate_c0 = if args.sc0 > 0.0 { rho * args.sc0 } else { 0.0 };
     let rate_c1 = if args.sc1 > 0.0 { rho * args.sc1 } else { 0.0 };
     let rate_d0 = if args.sd0 > 0.0 { rho * args.sd0 } else { 0.0 };
@@ -282,12 +275,13 @@ fn main() {
 
         // Event rates (constants hoisted; an empty bucket gives rate 0.0 via
         // multiplication by zero length, matching the old explicit guards)
-        let r0 = rate_flip * (net.bucket_len(bidx(BucketKind::D1)) as f64);
-        let r1 = rate_c0 * (net.bucket_len(bidx(BucketKind::C0)) as f64);
-        let r2 = rate_c1 * (net.bucket_len(bidx(BucketKind::C1)) as f64);
-        let r3 = rate_d0 * (net.bucket_len(bidx(BucketKind::D0)) as f64);
-        let r4 = rate_d1 * (net.bucket_len(bidx(BucketKind::D1)) as f64);
-        let r_tot = r0 + r1 + r2 + r3 + r4;
+        let r0 = rate_infection * (net.bucket_len(bidx(BucketKind::D1)) as f64);
+        let r1 = rate_recovery * (net.ones_count() as f64);
+        let r2 = rate_c0 * (net.bucket_len(bidx(BucketKind::C0)) as f64);
+        let r3 = rate_c1 * (net.bucket_len(bidx(BucketKind::C1)) as f64);
+        let r4 = rate_d0 * (net.bucket_len(bidx(BucketKind::D0)) as f64);
+        let r5 = rate_d1 * (net.bucket_len(bidx(BucketKind::D1)) as f64);
+        let r_tot = r0 + r1 + r2 + r3 + r4 + r5;
         if r_tot <= 0.0 {
             absorbing_state = true;
             // Fill remaining sampling points with constant state
@@ -315,22 +309,29 @@ fn main() {
         };
 
     match ev {
-            // (0) discordant-present edge triggers a colour flip at a random endpoint
+            // (0) infection along a discordant-present edge, flipping the susceptible endpoint
             0 => {
                 if let Some((u,v)) = net.pick_random(bidx(BucketKind::D1), &mut rng) {
-                    let u0 = if rng.random::<bool>() { u } else { v }; // endpoint to flip
+                    let u0 = if net.colour()[u as usize] == 0 { u } else { v };
                     net.flip_colour(u0, t);
                     sim_steps_v += 1;
                 }
             }
-            // (1..=4) edge add/remove within concordant/discordant buckets
-            1 | 2 | 3 | 4 => {
+            // (1) recovery of a random colour-1 vertex
+            1 => {
+                if let Some(u1) = net.pick_random_vertex(1, &mut rng) {
+                    net.flip_colour(u1, t);
+                    sim_steps_v += 1;
+                }
+            }
+            // (2..=5) edge add/remove within concordant/discordant buckets
+            2 | 3 | 4 | 5 => {
                 use BucketKind::*;
                 let (from_idx, to_idx) = match ev {
-                    1 => (bidx(C0), bidx(C1)), // absent concordant -> present
-                    2 => (bidx(C1), bidx(C0)), // present concordant -> absent
-                    3 => (bidx(D0), bidx(D1)), // absent discordant -> present
-                    4 => (bidx(D1), bidx(D0)), // present discordant -> absent
+                    2 => (bidx(C0), bidx(C1)), // absent concordant -> present
+                    3 => (bidx(C1), bidx(C0)), // present concordant -> absent
+                    4 => (bidx(D0), bidx(D1)), // absent discordant -> present
+                    5 => (bidx(D1), bidx(D0)), // present discordant -> absent
                     _ => unreachable!(),
                 };
                 let _ = net.move_edge(from_idx, to_idx, &mut rng);

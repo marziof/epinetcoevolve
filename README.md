@@ -73,8 +73,9 @@ Use `./target/release/netcoevolve --help` to see the CLI help.
 |---|---|---|
 | `--n` | Number of vertices; must be at least 2 | `1000` |
 | `--rho` | Common edge-event rate multiplier | `1.0` |
-| `--eta` | Colour-flip rate per endpoint of each discordant present edge | `1.0` |
-| `--beta` | Scaling shortcut: require `beta > 0`, set `rho = n`, and replace `eta` with `beta`; cannot be combined with `--rho` | not set |
+| `--eta` | Overall timescale multiplier for vertex flips and edge events | `1.0` |
+| `--beta` | Infection coefficient in the contact process | `1.0` |
+| `--gamma` | Recovery coefficient in the contact process | `1.0` |
 | `--sd0` | Discordant absent-to-present multiplier | `0.7` |
 | `--sd1` | Discordant present-to-absent multiplier | `2.0` |
 | `--sc0` | Concordant absent-to-present multiplier | `1.5` |

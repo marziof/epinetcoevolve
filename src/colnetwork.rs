@@ -1,7 +1,7 @@
 //! Coloured network data structure encapsulating adjacency, colours, buckets and position mapping.
 //! Provides O(1) random edge operations with swap–pop buckets.
 
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 /// Upper-triangle index for (u,v) with u < v.
 #[inline]
@@ -70,13 +70,45 @@ impl Bucket {
     }
 }
 
+/// Dense bucket of vertex ids with swap–pop deletion.
+#[derive(Default)]
+pub struct VertexBucket {
+    pub(crate) a: Vec<u32>,
+}
+impl VertexBucket {
+    #[inline]
+    pub fn len(&self) -> usize { self.a.len() }
+    #[inline]
+    pub fn is_empty(&self) -> bool { self.a.is_empty() }
+    #[inline]
+    pub fn push(&mut self, u: u32) -> usize {
+        let idx = self.a.len();
+        self.a.push(u);
+        idx
+    }
+    #[inline]
+    pub fn pop_at(&mut self, i: usize) -> u32 {
+        let last = self.a.len() - 1;
+        if i != last { self.a.swap(i, last); }
+        self.a.pop().unwrap()
+    }
+    #[inline]
+    pub fn pick_random<R: Rng>(&self, rng: &mut R) -> Option<u32> {
+        if self.a.is_empty() { return None; }
+        let i = rng.random_range(0..self.a.len());
+        Some(self.a[i])
+    }
+}
+
 /// Coloured Network encapsulating adjacency, colour vector, bucket classification and position table.
 pub struct ColNetwork {
     pub(crate) n: u32,
     adj: Vec<u8>,        // n x n symmetric (0/1)
     colour: Vec<u8>,     // length n (0/1)
     pos: Vec<u32>,       // upper-triangle mapping -> index within its bucket
+    vertex_pos: Vec<u32>, // vertex mapping -> index within its colour bucket
     buckets: [Bucket; 4],
+    vertices: [VertexBucket; 2],
     present_edges: usize,
     ones_count: usize,
     pub(crate) last_flip: Vec<f64>, // time of last colour flip for each vertex (initial 0.0)
@@ -94,8 +126,13 @@ impl ColNetwork {
             Bucket::default(),
         ];
         let mut pos: Vec<u32> = vec![0; (n as usize * (n as usize - 1)) / 2];
+        let mut vertex_pos: Vec<u32> = vec![0; n as usize];
+        let mut vertices: [VertexBucket; 2] = [VertexBucket::default(), VertexBucket::default()];
         let mut present_edges = 0usize;
         for u in 0..n {
+            let c = colour[u as usize] as usize;
+            let idx = vertices[c].push(u);
+            vertex_pos[u as usize] = idx as u32;
             for v in (u + 1)..n {
                 let ui = u as usize;
                 let vi = v as usize;
@@ -113,7 +150,9 @@ impl ColNetwork {
             adj,
             colour,
             pos,
+            vertex_pos,
             buckets,
+            vertices,
             present_edges,
             ones_count,
             last_flip: vec![0.0; n as usize],
@@ -140,6 +179,11 @@ impl ColNetwork {
         rng: &mut R,
     ) -> Option<(u32, u32)> {
         self.buckets[bucket_index].pick_random(rng)
+    }
+
+    /// Random vertex from a colour class (0 or 1).
+    pub fn pick_random_vertex<R: Rng>(&self, colour: u8, rng: &mut R) -> Option<u32> {
+        self.vertices[colour as usize].pick_random(rng)
     }
 
     /// Move a random edge from one bucket to another, updating adjacency & present edge count if presence status changes.
@@ -184,6 +228,16 @@ impl ColNetwork {
         let row = uidx * n; // base of row u in adjacency
         let old = self.colour[uidx];
         let new = 1 - old;
+        {
+            let old_bucket = &mut self.vertices[old as usize];
+            let i = self.vertex_pos[uidx] as usize;
+            let removed = old_bucket.pop_at(i);
+            debug_assert_eq!(removed, u);
+            if i < old_bucket.len() {
+                let swapped = old_bucket.a[i];
+                self.vertex_pos[swapped as usize] = i as u32;
+            }
+        }
         // Pass 1: remove all incident edges from their current buckets.
         // Bucket membership still reflects the OLD colour of u, so
         // same_colour(w) == (colour[w] == old).
@@ -205,6 +259,8 @@ impl ColNetwork {
         }
         self.colour[uidx] = new;
         if old == 0 { self.ones_count += 1; } else { self.ones_count -= 1; }
+        let new_idx = self.vertices[new as usize].push(u);
+        self.vertex_pos[uidx] = new_idx as u32;
         // Pass 2: reinsert with the NEW colour: same_colour(w) == (colour[w] == new).
         for w in 0..self.n {
             if w == u { continue; }
