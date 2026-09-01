@@ -1,6 +1,8 @@
 # netcoevolve
 
-`netcoevolve` is a fast Rust implementation of the stochastic co-evolving network model introduced in ["Co-evolving vertex and edge dynamics in dense graphs"](https://arxiv.org/abs/2504.06493) by S. Athreya, F. den Hollander, and A. Röllin. It simulates a dense undirected graph whose vertices have one of two colours and writes colour, edge, and coloured-motif densities to CSV.
+`netcoevolve` is a fast Rust implementation of a stochastic co-evolving contact process on a dense undirected graph. Vertices are in a susceptible/infected state encoded by a binary colour, edges evolve between present/absent states, and the simulator records colour, edge, and motif densities to CSV.
+
+The model is an SIS-type contact process with coevolving edge dynamics: infection spreads along infected–susceptible contacts, infected vertices recover at rate `gamma`, and edge rewiring is driven by the same Gillespie event mechanism used for vertex updates.
 
 ## Requirements
 
@@ -27,16 +29,23 @@ The binary is written to `target/release/netcoevolve`. A development build can b
 
 ## Simulation model
 
-Every unordered vertex pair belongs to one of four buckets:
+The current implementation is a co-evolving SIS/contact process. Each vertex is either susceptible (`0`) or infected (`1`). Every unordered vertex pair belongs to one of four buckets:
 
-| Bucket | Vertex colours | Edge state |
+| Bucket | Vertex states | Edge state |
 |---|---|---|
 | `C0` | concordant (equal) | absent |
 | `C1` | concordant (equal) | present |
 | `D0` | discordant (different) | absent |
 | `D1` | discordant (different) | present |
 
-The simulator uses the Gillespie direct method. Edge transitions have the following per-pair rates:
+The simulator uses the Gillespie direct method. The vertex dynamics are:
+
+- infection: `eta * beta * (# infected neighbours) / n`
+- recovery: `eta * gamma`
+
+In the implemented event scheme, we sample a random `D1` edge and infect the susceptible endpoint at rate proportional to `eta * beta / n`; each infected vertex also recovers at rate `eta * gamma`. This gives the standard SIS contact-process dynamics on the evolving graph.
+
+The edge transitions keep the same co-evolutionary rewiring structure:
 
 | Transition | Per-pair rate |
 |---|---|
@@ -45,7 +54,7 @@ The simulator uses the Gillespie direct method. Edge transitions have the follow
 | `D0 -> D1` | `rho * sd0` |
 | `D1 -> D0` | `rho * sd1` |
 
-Each `D1` edge triggers colour flips at total rate `2 * eta`; one of its endpoints is selected uniformly, so each endpoint is selected at rate `eta` through that edge. A colour flip reclassifies all pairs incident to that vertex.
+Any colour flip reclassifies all pairs incident to that vertex, so the edge buckets and vertex states are updated together in the same simulation.
 
 ## Run
 
@@ -73,13 +82,13 @@ Use `./target/release/netcoevolve --help` to see the CLI help.
 |---|---|---|
 | `--n` | Number of vertices; must be at least 2 | `1000` |
 | `--rho` | Common edge-event rate multiplier | `1.0` |
-| `--eta` | Overall timescale multiplier for vertex flips and edge events | `1.0` |
-| `--beta` | Infection coefficient in the contact process | `1.0` |
-| `--gamma` | Recovery coefficient in the contact process | `1.0` |
-| `--sd0` | Discordant absent-to-present multiplier | `0.7` |
-| `--sd1` | Discordant present-to-absent multiplier | `2.0` |
-| `--sc0` | Concordant absent-to-present multiplier | `1.5` |
-| `--sc1` | Concordant present-to-absent multiplier | `0.3` |
+| `--eta` | Overall timescale multiplier for infection, recovery, and edge events | `1.0` |
+| `--beta` | Infection rate coefficient in the SIS/contact process | `1.0` |
+| `--gamma` | Recovery rate coefficient in the SIS/contact process | `1.0` |
+| `--sd0` | Discordant absent-to-present edge-switch multiplier | `0.7` |
+| `--sd1` | Discordant present-to-absent edge-switch multiplier | `2.0` |
+| `--sc0` | Concordant absent-to-present edge-switch multiplier | `1.5` |
+| `--sc1` | Concordant present-to-absent edge-switch multiplier | `0.3` |
 
 ### Initial state
 
