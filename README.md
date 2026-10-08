@@ -85,10 +85,10 @@ Use `./target/release/netcoevolve --help` to see the CLI help.
 | `--eta` | Overall timescale multiplier for infection, recovery, and edge events | `1.0` |
 | `--beta` | Infection rate coefficient in the SIS/contact process | `1.0` |
 | `--gamma` | Recovery rate coefficient in the SIS/contact process | `1.0` |
-| `--sd0` | Discordant absent-to-present edge-switch multiplier | `0.7` |
-| `--sd1` | Discordant present-to-absent edge-switch multiplier | `2.0` |
-| `--sc0` | Concordant absent-to-present edge-switch multiplier | `1.5` |
-| `--sc1` | Concordant present-to-absent edge-switch multiplier | `0.3` |
+| `--sd0` | Discordant absent-to-present edge-switch multiplier | `0.05` |
+| `--sd1` | Discordant present-to-absent edge-switch multiplier | `0.9` |
+| `--sc0` | Concordant absent-to-present edge-switch multiplier | `0.9` |
+| `--sc1` | Concordant present-to-absent edge-switch multiplier | `0.05` |
 
 ### Initial state
 
@@ -96,7 +96,7 @@ Vertex colours are initialized independently. Conditional on those colours, edge
 
 | Flag | Meaning | Default |
 |---|---|---|
-| `--p1` | Probability that a vertex initially has colour 1 | `0.5` |
+| `--p1` | Probability that a vertex initially has colour 1 | `0.05` |
 | `--p00` | Initial edge probability between two colour-0 vertices | `0.5` |
 | `--p01` | Initial edge probability between differently coloured vertices | `0.5` |
 | `--p11` | Initial edge probability between two colour-1 vertices | `0.5` |

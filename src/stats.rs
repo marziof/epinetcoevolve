@@ -14,6 +14,23 @@ use crate::Cli; // ensure Cli is in scope after removal of earlier accidental co
 
 thread_local! {
     static STATS_WRITER: std::cell::RefCell<Option<CsvStatsWriter>> = std::cell::RefCell::new(None);
+    static DENSITY_WRITER: std::cell::RefCell<Option<DensityWriter>> = std::cell::RefCell::new(None);
+}
+
+pub fn init_density_writer(path_opt: Option<String>, args: &Cli, effective_seed: u64, seed_random: bool) {
+    DENSITY_WRITER.with(|slot| {
+        *slot.borrow_mut() = Some(DensityWriter::new(path_opt, args, effective_seed, seed_random).expect("create density CSV"));
+    });
+}
+
+pub fn compute_density_stats(t: f64, d1: usize, concordant_present: usize, _concordant_absent: usize, infected: usize, n: usize) {
+    let n_f = n as f64;
+    let pair_count = n_f * (n_f - 1.0) / 2.0;
+    DENSITY_WRITER.with(|slot| {
+        if let Some(writer) = slot.borrow_mut().as_mut() {
+            writer.write_row(t, infected as f64 / n_f, d1 as f64 / pair_count, concordant_present as f64 / pair_count);
+        }
+    });
 }
 
 pub fn init_stats_writer(path_opt: Option<String>, args: &Cli, effective_seed: u64, seed_random: bool, dump_adj: bool) {
@@ -24,7 +41,7 @@ pub fn init_stats_writer(path_opt: Option<String>, args: &Cli, effective_seed: u
 
 /// Compute stats and append CSV row.
 #[inline]
-pub fn compute_stats(t: f64, adj: &[u8], colour: &[u8], last_flip: &[f64], n: usize) {
+pub fn compute_stats(t: f64, adj: &[u8], colour: &[u8], last_flip: &[f64], n: usize, eta: f64, beta: f64, diagnostic_fraction: f64, burn_in: f64) {
     debug_assert!(adj.len() == n * n && colour.len() == n);
     // Build colour index lists
     let mut idx0 = Vec::new();
@@ -90,6 +107,67 @@ pub fn compute_stats(t: f64, adj: &[u8], colour: &[u8], last_flip: &[f64], n: us
     } else { 0.0 };
     let ne01 = if c0 > 0 && c1 > 0 { ((c0 as f64 * c1 as f64) - sum01) / n_pairs } else { 0.0 };
 
+    // Thesis diagnostics use susceptible vertices (colour 0) and total-pair
+    // edge densities. deg01 is I_u and deg00 is S_u for u in S.
+    let q = col1;
+    let p_d = e01;
+    let p_c0 = e00;
+    let p_c1 = e11;
+    let diagnostics_active = t >= burn_in && c1 > 0;
+    let (n_var_s, n_cov_s, w_d, identity_si_error, identity_ss_error) = if diagnostics_active && c0 > 0 {
+        let fraction = diagnostic_fraction.clamp(0.0, 1.0);
+        let sample_count = ((c0 as f64 * fraction).ceil() as usize).clamp(1, c0);
+        let mut sampled_i = Vec::with_capacity(sample_count);
+        let mut sampled_s = Vec::with_capacity(sample_count);
+        for sample_index in 0..sample_count {
+            let index = sample_index * c0 / sample_count;
+            sampled_i.push(deg01[index]);
+            sampled_s.push(deg00[index]);
+        }
+        let mean_i = sampled_i.iter().sum::<f64>() / sample_count as f64;
+        let mean_s = sampled_s.iter().sum::<f64>() / sample_count as f64;
+        let mut var_i = 0.0;
+        let mut cov_is = 0.0;
+        let mut w_d = 0.0;
+        for (&i_u, &s_u) in sampled_i.iter().zip(sampled_s.iter()) {
+            var_i += (i_u - mean_i).powi(2);
+            cov_is += (i_u - mean_i) * (s_u - mean_s);
+        }
+        for (&i_u, &s_u) in deg01.iter().zip(deg00.iter()) {
+            w_d += i_u * (s_u - i_u);
+        }
+        let denom_s = sample_count as f64;
+        let expected_si = n_pairs * p_d;
+        let expected_ss = 2.0 * n_pairs * p_c0;
+        (
+            (var_i / denom_s) / n as f64,
+            (cov_is / denom_s) / n as f64,
+            w_d,
+            deg01.iter().sum::<f64>() - expected_si,
+            deg00.iter().sum::<f64>() - expected_ss,
+        )
+    } else {
+        (f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN)
+    };
+    let drift_empirical = if diagnostics_active {
+        2.0 * eta * beta * w_d / ((n as f64).powi(2) * (n as f64 - 1.0))
+    } else {
+        f64::NAN
+    };
+    let drift_closed = if diagnostics_active && q < 1.0 {
+        eta * beta * (p_d * p_c0 / (1.0 - q) - p_d.powi(2) / (2.0 * (1.0 - q)))
+    } else {
+        f64::NAN
+    };
+    let drift_error = drift_empirical - drift_closed;
+    let r = if diagnostics_active && q > 0.0 && q < 1.0 {
+        p_d / (2.0 * q * (1.0 - q))
+    } else {
+        0.0
+    };
+    let n_var_reference = if diagnostics_active { q * r * (1.0 - r) } else { f64::NAN };
+    let n_cov_reference = if diagnostics_active { 0.0 } else { f64::NAN };
+
     // tr(A^3) = sum_{i,j} A2[i,j] * A[i,j] for symmetric A, so the second
     // O(n^3) matmul of the old version (A2 * A) is replaced by an O(n^2)
     // elementwise pass. Entries are small exact integers in f32/f64, so the
@@ -101,6 +179,7 @@ pub fn compute_stats(t: f64, adj: &[u8], colour: &[u8], last_flip: &[f64], n: us
         for j in 0..n { for i in 0..n { tr += (a2[(i, j)] as f64) * (a[(i, j)] as f64); } }
         tr / 6.0
     }
+    let n_f = n as f64;
     let cyc000_count = tri_count_f(&a00);
     let cyc111_count = tri_count_f(&a11);
 
@@ -119,7 +198,6 @@ pub fn compute_stats(t: f64, adj: &[u8], colour: &[u8], last_flip: &[f64], n: us
     //  - 3-paths s0 s1 s2 s3: sum_{(u,v) edge with colours (s1,s2)} d_{s0}(u)*d_{s3}(v) over both orientations / n^4.
     //  - 3-stars centre colour c with leaf multiset (k ones): sum d0^{3-k} d1^{k} / n^4 (leaves treated as labelled in hom definition).
 
-    let n_f = n as f64;
     // (degrees deg00/deg01/deg10/deg11 already computed above)
 
     // Triangle hom densities (replace previous injective densities)
@@ -226,7 +304,7 @@ pub fn compute_stats(t: f64, adj: &[u8], colour: &[u8], last_flip: &[f64], n: us
     // Values computed above: p3_* and s*_*
     STATS_WRITER.with(|slot| {
         if let Some(w) = slot.borrow_mut().as_mut() {
-            w.write_row_extended(t, col0, col1, e00, e01, e11, ne00, ne01, ne11, cyc000, cyc001, cyc011, cyc111, p000, p001, p010, p011, p101, p111,
+                w.write_row_extended(t, col0, col1, e00, e01, e11, ne00, ne01, ne11, q, p_d, p_c0, p_c1, n_var_s, n_var_reference, n_cov_s, n_cov_reference, drift_empirical, drift_closed, drift_error, identity_si_error, identity_ss_error, cyc000, cyc001, cyc011, cyc111, p000, p001, p010, p011, p101, p111,
                 p3_0000, p3_0001, p3_0010, p3_0011, p3_0101, p3_0110, p3_0111, p3_1001, p3_1011, p3_1111,
                 s0_000, s0_001, s0_011, s0_111, s1_000, s1_001, s1_011, s1_111);
             if w.dump_adj {
@@ -238,6 +316,29 @@ pub fn compute_stats(t: f64, adj: &[u8], colour: &[u8], last_flip: &[f64], n: us
 
 pub fn flush_stats() {
     STATS_WRITER.with(|slot| { if let Some(w) = slot.borrow_mut().as_mut() { w.flush(); } });
+    DENSITY_WRITER.with(|slot| { if let Some(w) = slot.borrow_mut().as_mut() { w.flush(); } });
+}
+
+struct DensityWriter { w: BufWriter<File> }
+
+impl DensityWriter {
+    fn new(path_opt: Option<String>, args: &Cli, effective_seed: u64, seed_random: bool) -> std::io::Result<Self> {
+        let path = path_opt.unwrap_or_else(|| "output/densities.csv".to_string());
+        if let Some(parent) = std::path::Path::new(&path).parent() { create_dir_all(parent)?; }
+        let mut w = BufWriter::new(File::create(path)?);
+        writeln!(w, "# netcoevolve={} n={} rho={} eta={} beta={} gamma={} sd0={} sd1={} sc0={} sc1={} p1={} p00={} p01={} p11={} sample_delta={} t_max={} burn_in={} densities_only=true seed={}{}",
+            env!("CARGO_PKG_VERSION"), args.n, args.rho.unwrap_or(1.0), args.eta, args.beta, args.gamma,
+            args.sd0, args.sd1, args.sc0, args.sc1, args.p1, args.p00, args.p01, args.p11,
+            args.sample_delta, args.t_max, args.burn_in, effective_seed, if seed_random { " (random)" } else { "" })?;
+        writeln!(w, "time,q,p_d,concordant_present,edge_density")?;
+        Ok(Self { w })
+    }
+
+    fn write_row(&mut self, t: f64, q: f64, p_d: f64, concordant_present: f64) {
+        let _ = writeln!(self.w, "{:.9},{:.9e},{:.9e},{:.9e},{:.9e}", t, q, p_d, concordant_present, p_d + concordant_present);
+    }
+
+    fn flush(&mut self) { let _ = self.w.flush(); }
 }
 
 struct CsvStatsWriter { w: BufWriter<File>, dump_adj: bool, base_path: String, header_line: String }
@@ -253,7 +354,7 @@ impl CsvStatsWriter {
         let f = File::create(&path)?;
         let mut w = BufWriter::new(f);
         // Build the main header line first so we can reuse it in adjacency snapshot files verbatim.
-        let header_line = format!("# netcoevolve={} n={} rho={} eta={} beta={} gamma={} sd0={} sd1={} sc0={} sc1={} p1={} p00={} p01={} p11={} sample_delta={} t_max={} stop_at_polarisation={} seed={}{} output_file={}",
+        let header_line = format!("# netcoevolve={} n={} rho={} eta={} beta={} gamma={} sd0={} sd1={} sc0={} sc1={} p1={} p00={} p01={} p11={} sample_delta={} t_max={} burn_in={} stop_at_polarisation={} diagnostic_fraction={} seed={}{} output_file={}",
             env!("CARGO_PKG_VERSION"),
             args.n,
             args.rho.unwrap_or(1.0),
@@ -270,24 +371,27 @@ impl CsvStatsWriter {
             args.p11,
             args.sample_delta,
             args.t_max,
+            args.burn_in,
             args.stop_at_polarisation,
+            args.diagnostic_fraction,
             effective_seed,
             if seed_random { " (random)" } else { "" },
             path);
     writeln!(w, "{}", header_line)?;
     writeln!(w, "# coloured motif densities include symmetry multiplicities; sums across colour patterns recover uncoloured homomorphism densities for each motif family")?;
         writeln!(w, "# contact process rates: infection = eta*beta*#(1-neighbours)/n, recovery = eta*gamma")?;
-    writeln!(w, "time,col0,col1,e00,e01,e11,ne00,ne01,ne11,3cyc000,3cyc001,3cyc011,3cyc111,2p000,2p001,2p010,2p011,2p101,2p111,3p0000,3p0001,3p0010,3p0011,3p0101,3p0110,3p0111,3p1001,3p1011,3p1111,3s0_000,3s0_001,3s0_011,3s0_111,3s1_000,3s1_001,3s1_011,3s1_111")?;
+    writeln!(w, "time,col0,col1,e00,e01,e11,ne00,ne01,ne11,q,p_d,p_c0,p_c1,n_var_s,n_var_reference,n_cov_s,n_cov_reference,drift_empirical,drift_closed,drift_error,identity_si_error,identity_ss_error,3cyc000,3cyc001,3cyc011,3cyc111,2p000,2p001,2p010,2p011,2p101,2p111,3p0000,3p0001,3p0010,3p0011,3p0101,3p0110,3p0111,3p1001,3p1011,3p1111,3s0_000,3s0_001,3s0_011,3s0_111,3s1_000,3s1_001,3s1_011,3s1_111")?;
         Ok(Self { w, dump_adj, base_path: path, header_line })
     }
     #[inline]
     fn write_row_extended(&mut self, t: f64, col0: f64, col1: f64, e00: f64, e01: f64, e11: f64, ne00: f64, ne01: f64, ne11: f64,
+        q: f64, p_d: f64, p_c0: f64, p_c1: f64, n_var_s: f64, n_var_reference: f64, n_cov_s: f64, n_cov_reference: f64, drift_empirical: f64, drift_closed: f64, drift_error: f64, identity_si_error: f64, identity_ss_error: f64,
         cyc000: f64, cyc001: f64, cyc011: f64, cyc111: f64,
         p000: f64, p001: f64, p010: f64, p011: f64, p101: f64, p111: f64,
         p3_0000: f64, p3_0001: f64, p3_0010: f64, p3_0011: f64, p3_0101: f64, p3_0110: f64, p3_0111: f64, p3_1001: f64, p3_1011: f64, p3_1111: f64,
         s0_000: f64, s0_001: f64, s0_011: f64, s0_111: f64, s1_000: f64, s1_001: f64, s1_011: f64, s1_111: f64) {
-        let _ = writeln!(self.w, "{:.9},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e}",
-            t, col0, col1, e00, e01, e11, ne00, ne01, ne11, cyc000, cyc001, cyc011, cyc111, p000, p001, p010, p011, p101, p111,
+        let _ = writeln!(self.w, "{:.9},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e}",
+            t, col0, col1, e00, e01, e11, ne00, ne01, ne11, q, p_d, p_c0, p_c1, n_var_s, n_var_reference, n_cov_s, n_cov_reference, drift_empirical, drift_closed, drift_error, identity_si_error, identity_ss_error, cyc000, cyc001, cyc011, cyc111, p000, p001, p010, p011, p101, p111,
             p3_0000, p3_0001, p3_0010, p3_0011, p3_0101, p3_0110, p3_0111, p3_1001, p3_1011, p3_1111,
             s0_000, s0_001, s0_011, s0_111, s1_000, s1_001, s1_011, s1_111);
     }
@@ -322,4 +426,47 @@ impl CsvStatsWriter {
         }
     }
     fn flush(&mut self) { let _ = self.w.flush(); }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn thesis_pair_identities_hold() {
+        let n = 4usize;
+        let colour = [0u8, 0, 1, 1];
+        let mut adj = vec![0u8; n * n];
+        for (u, v) in [(0usize, 1usize), (0, 2), (1, 2), (1, 3)] {
+            adj[u * n + v] = 1;
+            adj[v * n + u] = 1;
+        }
+        let mut sum_i = 0usize;
+        let mut sum_s = 0usize;
+        for u in 0..n {
+            if colour[u] != 0 { continue; }
+            for v in 0..n {
+                if adj[u * n + v] == 0 { continue; }
+                if colour[v] == 1 { sum_i += 1; } else { sum_s += 1; }
+            }
+        }
+        let si_edges = 3usize;
+        let ss_edges = 1usize;
+        assert_eq!(sum_i, si_edges);
+        assert_eq!(sum_s, 2 * ss_edges);
+    }
+
+    #[test]
+    fn thesis_variance_and_covariance_forms_agree() {
+        let i = [2.0, 1.0];
+        let s = [1.0, 1.0];
+        let mean_i = i.iter().sum::<f64>() / i.len() as f64;
+        let mean_s = s.iter().sum::<f64>() / s.len() as f64;
+        let direct_var = i.iter().map(|x| (x - mean_i).powi(2)).sum::<f64>() / i.len() as f64;
+        let direct_cov = i.iter().zip(s.iter()).map(|(x, y)| (x - mean_i) * (y - mean_s)).sum::<f64>() / i.len() as f64;
+        let w0 = i.iter().map(|x| x * x).sum::<f64>();
+        let w1 = i.iter().zip(s.iter()).map(|(x, y)| x * y).sum::<f64>();
+        let moment_var = w0 / i.len() as f64 - mean_i.powi(2);
+        let moment_cov = w1 / i.len() as f64 - mean_i * mean_s;
+        assert!((direct_var - moment_var).abs() < f64::EPSILON);
+        assert!((direct_cov - moment_cov).abs() < f64::EPSILON);
+    }
 }

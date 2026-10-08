@@ -64,19 +64,19 @@ struct Cli {
     t_max: f64,
 
     /// sd0 (discordant ABSENT -> PRESENT multiplier)
-    #[arg(long = "sd0", default_value_t = 0.7)]
+    #[arg(long = "sd0", default_value_t = 0.05)]
     sd0: f64,
 
     /// sd1 (discordant PRESENT -> ABSENT multiplier)
-    #[arg(long = "sd1", default_value_t = 2.0)]
+    #[arg(long = "sd1", default_value_t = 0.9)]
     sd1: f64,
 
     /// sc0 (concordant ABSENT -> PRESENT multiplier)
-    #[arg(long = "sc0", default_value_t = 1.5)]
+    #[arg(long = "sc0", default_value_t = 0.9)]
     sc0: f64,
 
     /// sc1 (concordant PRESENT -> ABSENT multiplier)
-    #[arg(long = "sc1", default_value_t = 0.3)]
+    #[arg(long = "sc1", default_value_t = 0.05)]
     sc1: f64,
 
     /// RNG seed; use --seed=random for time-based seed
@@ -84,7 +84,7 @@ struct Cli {
     seed: String,
     
     /// p1 (initial probability a vertex has colour 1)
-    #[arg(long = "p1", default_value_t = 0.5)]
+    #[arg(long = "p1", default_value_t = 0.05)]
     p1: f64,
 
     /// p00 (initial edge probability between two colour-0 vertices)
@@ -110,10 +110,22 @@ struct Cli {
     /// stop_at_polarisation (stop as soon as no discordant PRESENT edges remain)
     #[arg(long = "stop_at_polarisation", default_value_t = false)]
     stop_at_polarisation: bool,
+
+    /// Fraction of susceptible vertices used for variance/covariance diagnostics
+    #[arg(long = "diagnostic_fraction", default_value_t = 1.0)]
+    diagnostic_fraction: f64,
+
+    /// Burn-in time before closure diagnostics are reported
+    #[arg(long = "burn_in", default_value_t = 10.0)]
+    burn_in: f64,
+
+    /// Record only vertex and overall edge densities for large runs
+    #[arg(long = "densities_only", default_value_t = false)]
+    densities_only: bool,
 }
 // (stats module handles its own file I/O; no direct file imports needed here)
 mod stats;
-use stats::{init_stats_writer, compute_stats, flush_stats};
+use stats::{init_stats_writer, compute_stats, flush_stats, init_density_writer, compute_density_stats};
 
 // (colnetwork module encapsulates bucket + adjacency logic)
 #[inline] fn set_edge(adj: &mut [u8], n: usize, u: usize, v: usize, present: bool) {
@@ -203,6 +215,9 @@ fn main() {
     println!("  p01            = {}", args.p01);
     println!("  p11            = {}", args.p11);
     println!("  stop_at_polarisation = {}", args.stop_at_polarisation);
+    println!("  diagnostic_fraction = {}", args.diagnostic_fraction);
+    println!("  densities_only     = {}", args.densities_only);
+    println!("  burn_in            = {}", args.burn_in);
     println!("  output         = {}", output_path);
     println!();
 
@@ -246,12 +261,17 @@ fn main() {
     let mut sim_steps_v: u64 = 0; // colour flips
     let mut absorbing_state = false;
     let mut stopped_at_polarisation = false;
+    let mut extinction_time: Option<f64> = None;
     let started = Instant::now();
 
     // Statistics writer init + header (compute_stats will append rows).
     // The loop's first iteration writes the t=0 sample, so we don't write it
     // here (would produce a duplicate row).
-    init_stats_writer(Some(output_path.clone()), &args, effective_seed, seed_random, args.dump_adj);
+    if args.densities_only {
+        init_density_writer(Some(output_path.clone()), &args, effective_seed, seed_random);
+    } else {
+        init_stats_writer(Some(output_path.clone()), &args, effective_seed, seed_random, args.dump_adj);
+    }
 
     while t < t_max {
         let mut sampled_this_iter = false;
@@ -260,7 +280,11 @@ fn main() {
         if t >= next_tick_t {
             pb.set_position(samples_done.min(total_ticks));
             update_bar(&pb, t, net.present_edges(), net.ones_count(), denom_pairs, n);
-            compute_stats(t, net.adj(), net.colour(), net.last_flip_times(), n);
+            if args.densities_only {
+                compute_density_stats(t, net.bucket_len(bidx(BucketKind::D1)), net.bucket_len(bidx(BucketKind::C1)), net.bucket_len(bidx(BucketKind::C0)), net.ones_count(), n);
+            } else {
+                compute_stats(t, net.adj(), net.colour(), net.last_flip_times(), n, args.eta, args.beta, args.diagnostic_fraction, args.burn_in);
+            }
             samples_done += 1;
             sampled_this_iter = true;
         }
@@ -268,7 +292,11 @@ fn main() {
         if args.stop_at_polarisation && net.bucket_is_empty(bidx(BucketKind::D1)) {
             stopped_at_polarisation = true;
             if !sampled_this_iter {
-                compute_stats(t.min(t_max), net.adj(), net.colour(), net.last_flip_times(), n);
+                if args.densities_only {
+                    compute_density_stats(t.min(t_max), net.bucket_len(bidx(BucketKind::D1)), net.bucket_len(bidx(BucketKind::C1)), net.bucket_len(bidx(BucketKind::C0)), net.ones_count(), n);
+                } else {
+                    compute_stats(t.min(t_max), net.adj(), net.colour(), net.last_flip_times(), n, args.eta, args.beta, args.diagnostic_fraction, args.burn_in);
+                }
             }
             break;
         }
@@ -290,7 +318,11 @@ fn main() {
                 if tick_t > t_max + 1e-12 { break; }
                 pb.set_position(samples_done.min(total_ticks));
                 update_bar(&pb, t, net.present_edges(), net.ones_count(), denom_pairs, n);
-                compute_stats(tick_t.min(t_max), net.adj(), net.colour(), net.last_flip_times(), n);
+                if args.densities_only {
+                    compute_density_stats(tick_t.min(t_max), net.bucket_len(bidx(BucketKind::D1)), net.bucket_len(bidx(BucketKind::C1)), net.bucket_len(bidx(BucketKind::C0)), net.ones_count(), n);
+                } else {
+                    compute_stats(tick_t.min(t_max), net.adj(), net.colour(), net.last_flip_times(), n, args.eta, args.beta, args.diagnostic_fraction, args.burn_in);
+                }
                 samples_done += 1;
             }
             t = t_max; // jump to end
@@ -304,8 +336,28 @@ fn main() {
         // Choose event by one uniform
     let x = rng.random::<f64>() * r_tot;
         let ev = {
-            let mut s = r0;
-            if x < s { 0 } else { s += r1; if x < s { 1 } else { s += r2; if x < s { 2 } else { s += r3; if x < s { 3 } else { 4 }}}}
+            let mut cumulative = r0;
+            if x < cumulative {
+                0
+            } else {
+                cumulative += r1;
+                if x < cumulative {
+                    1
+                } else {
+                    cumulative += r2;
+                    if x < cumulative {
+                        2
+                    } else {
+                        cumulative += r3;
+                        if x < cumulative {
+                            3
+                        } else {
+                            cumulative += r4;
+                            if x < cumulative { 4 } else { 5 }
+                        }
+                    }
+                }
+            }
         };
 
     match ev {
@@ -339,6 +391,11 @@ fn main() {
             _ => unreachable!(),
         }
 
+        if net.ones_count() == 0 {
+            extinction_time = Some(t);
+            break;
+        }
+
         // Optional invariant (enable in debug builds)
         debug_assert_eq!(
             net.bucket_len(0) + net.bucket_len(1) + net.bucket_len(2) + net.bucket_len(3),
@@ -353,15 +410,24 @@ fn main() {
     // hitting an absorbing state), the sample at exactly t_max was never
     // taken because the while-loop check t < t_max exits first. Write it
     // here so the CSV always ends with the final state.
-    if !stopped_at_polarisation && !absorbing_state {
-        compute_stats(t_max, net.adj(), net.colour(), net.last_flip_times(), n);
+    if !stopped_at_polarisation && !absorbing_state && extinction_time.is_none() {
+        if args.densities_only {
+            compute_density_stats(t_max, net.bucket_len(bidx(BucketKind::D1)), net.bucket_len(bidx(BucketKind::C1)), net.bucket_len(bidx(BucketKind::C0)), net.ones_count(), n);
+        } else {
+            compute_stats(t_max, net.adj(), net.colour(), net.last_flip_times(), n, args.eta, args.beta, args.diagnostic_fraction, args.burn_in);
+        }
     }
 
     // Final progress update
     pb.set_position(total_ticks);
     update_bar(&pb, t, net.present_edges(), net.ones_count(), denom_pairs, n);
     flush_stats();
-    if stopped_at_polarisation {
+    if let Some(extinction_t) = extinction_time {
+        pb.finish_with_message(format!(
+            "Done (extinct). t={:.6}, extinction_time={:.6}, steps={}, flips={}, elapsed={:?}",
+            t, extinction_t, sim_steps, sim_steps_v, started.elapsed()
+        ));
+    } else if stopped_at_polarisation {
         pb.finish_with_message(format!(
             "Done (polarised). t={:.6}, steps={}, flips={}, elapsed={:?}",
             t, sim_steps, sim_steps_v, started.elapsed()
