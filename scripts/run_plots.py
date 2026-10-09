@@ -23,16 +23,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_ROOT = PROJECT_ROOT / "output"
 
 # Edit this block for repeatable plots.
-PLOT_MODE = "multiple"  # single, multiple, errors, or bifurcation
-PLOT_FOLDER = "slice5_single_n1000_T100.0-runs_rho1.0"  # "manual-runs"
+PLOT_MODE = "errors"  # single, multiple, errors, or bifurcation
+PLOT_FOLDER = "S2_closure_diag_frac1.0_n1000_T100.0-runs_rho0.1"  # "manual-runs"
 PLOT_PATTERN = "*.csv" #"*_nsim10-r*.csv"
 PLOT_COMPONENT = "both"  # both, vertex, or edge (single/multiple modes)
 PLOT_OUTPUT = f"plots/{PLOT_MODE}_{PLOT_FOLDER}_{PLOT_COMPONENT}.png"
 PLOT_PARAMETER = "beta"  # parameter used by bifurcation mode
-PLOT_MULTIPLE_PARAMETER_VALUE: float | None = 3.0  # e.g. 1.15; None keeps all matching values
+PLOT_MULTIPLE_PARAMETER_VALUE: float | None = 2.2  # e.g. 1.15; None keeps all matching values
 PLOT_GROUP_BY = "p1"  # separate bifurcation curves by this fixed parameter
 PLOT_PARAMETER_RANGE: tuple[float | None, float | None] = (1.4, 1.6)#(None, None) #(, 2)#(None, None)  # e.g. (0.5, 1.5)
-PLOT_P1_VALUES: list[float] | None = [0.05]  # e.g. [0.05], [0.05, 0.95], or None for all
+PLOT_P1_VALUES: list[float] | None = [0.05, 0.95]  # e.g. [0.05], [0.05, 0.95], or None for all
 PLOT_FINAL_WINDOW = 1.0
 PLOT_SHOW = False
 PLOT_ODE = True

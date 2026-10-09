@@ -52,7 +52,7 @@ BOOL_FLAGS = ("dump_adj", "stop_at_polarisation", "densities_only")
 # Edit this block for repeatable experiments, then run:
 #     python scripts/menu.py --manual
 # Available modes: "single", "closure", and "sweep".
-MANUAL_MODE = "single"
+MANUAL_MODE = "closure"
 # MANUAL_VALUES: dict[str, Any] = {
 #     **DEFAULTS,
 #     "n": 500,
@@ -65,14 +65,14 @@ MANUAL_MODE = "single"
 MANUAL_VALUES: dict[str, Any] = {
     **DEFAULTS,
     "n": 1000,
-    "rho": 1.0,
+    "rho": 0.1,
     "eta": 1.0,
-    "beta": 3.0,
+    "beta": 2.2,
     "gamma": 1.0,
-    "sd0": 0.05,
-    "sd1": 1.0,
-    "sc0": 0.7,
-    "sc1": 0.1,
+    "sd0": 1.424,
+    "sd1": 0.291,
+    "sc0": 0.056,
+    "sc1": 0.412,
     "p1": 0.05,
     "p00": 0.5,
     "p01": 0.5,
@@ -84,7 +84,7 @@ MANUAL_VALUES: dict[str, Any] = {
     "seed": "42",
 }
 
-name = "slice5"
+name = "S2"
 #S1 = slice 1
 
 mode_string = f"{MANUAL_MODE}"
