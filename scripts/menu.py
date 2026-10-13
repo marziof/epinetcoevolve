@@ -52,7 +52,7 @@ BOOL_FLAGS = ("dump_adj", "stop_at_polarisation", "densities_only")
 # Edit this block for repeatable experiments, then run:
 #     python scripts/menu.py --manual
 # Available modes: "single", "closure", and "sweep".
-MANUAL_MODE = "closure"
+MANUAL_MODE = "sweep"
 # MANUAL_VALUES: dict[str, Any] = {
 #     **DEFAULTS,
 #     "n": 500,
@@ -64,25 +64,31 @@ MANUAL_MODE = "closure"
 
 MANUAL_VALUES: dict[str, Any] = {
     **DEFAULTS,
-    "n": 1000,
+    "n": 5000,
     "rho": 0.1,
     "eta": 1.0,
-    "beta": 2.2,
+    "beta": 1.0,
     "gamma": 1.0,
-    "sd0": 1.424,
-    "sd1": 0.291,
+    "sd0": 0.291,
+    "sd1": 1.424,
     "sc0": 0.056,
     "sc1": 0.412,
     "p1": 0.05,
     "p00": 0.5,
     "p01": 0.5,
     "p11": 0.5,
-    "sample_delta": 0.05,
+    "sample_delta": 0.1,
     "t_max": 100.0,
     "burn_in": 2.0,
     "diagnostic_fraction": 1.0,
     "seed": "42",
 }
+
+#S4
+    # "sd0": 0.003,
+    # "sd1": 4.176,
+    # "sc0": 0.056,
+    # "sc1": 0.013,
 
 name = "S2"
 #S1 = slice 1
@@ -98,7 +104,7 @@ MANUAL_FOLDER = f"{name}_{mode_string}_n{MANUAL_VALUES['n']}_T{MANUAL_VALUES['t_
 MANUAL_NAME = f"params_beta{MANUAL_VALUES['beta']}_{s_string}_p1{MANUAL_VALUES['p1']}_nsim{MANUAL_REPEATS}"
 MANUAL_SWEEP = {
     "parameter": "beta",
-    "values": [1.5, 2.0, 2.1, 2.2, 2.3, 2.4, 2.5, 2.75, 3.0, 4.0]#[500, 1000, 2000, 3000],#[1.12, 1.38],#[0.5, 1.0, 1.25, 1.5, 1.65, 1.85, 2.0, 2.25, 2.5, 3.0, 4.0, 5.0],
+    "values": [2.0, 2.1, 2.2, 2.3, 2.4, 2.5, 2.75]#[500, 1000, 2000, 3000],#[1.12, 1.38],#[0.5, 1.0, 1.25, 1.5, 1.65, 1.85, 2.0, 2.25, 2.5, 3.0, 4.0, 5.0],
 }
 
 #slice1
